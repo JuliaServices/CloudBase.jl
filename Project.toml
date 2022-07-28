@@ -1,0 +1,31 @@
+name = "CloudBase"
+uuid = "85eb1798-d7c4-4918-bb13-c944d38e27ed"
+authors = ["quinnj <quinn.jacobd@gmail.com>"]
+version = "1.0.0"
+
+[deps]
+Base64 = "2a0f44e3-6c83-55bd-87e4-b1978d98bd5f"
+Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
+Figgy = "937e9308-674a-48ca-a404-047094c8c902"
+HTTP = "cd3eb016-35fb-5094-929b-558a96fad6f3"
+LoggingExtras = "e6f89c97-d47a-5376-807f-9c37f3926c36"
+SHA = "ea8e919c-243c-51af-8825-aaa63cd721ce"
+Sockets = "6462fe0b-24de-5631-8697-dd941f90decc"
+URIs = "5c2747f8-b7ea-4ff2-ba2e-563bfd36b1d4"
+
+[compat]
+CloudTest = "1"
+Figgy = "1"
+HTTP = "1"
+JSON3 = "1"
+LoggingExtras = "0.4"
+URIs = "1"
+julia = "1.6"
+
+[extras]
+CloudTest = "37ac6dbb-5f5a-48fb-b8e0-db750e64b705"
+JSON3 = "0f8b85d8-7281-11e9-16c2-39a750bddbf1"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["CloudTest", "JSON3", "Test"]
