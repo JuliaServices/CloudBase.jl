@@ -1,6 +1,6 @@
 module CloudBase
 
-export AWS, Azure
+export CloudTest, AWS, Azure
 
 using Dates, Base64, Sockets
 using HTTP, URIs, SHA, LoggingExtras, Figgy
@@ -66,5 +66,7 @@ function __init__()
     azureLoadConfig!()
     return
 end
+
+include("CloudTest.jl")
 
 end # module CloudBase

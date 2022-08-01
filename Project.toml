@@ -9,23 +9,29 @@ Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
 Figgy = "937e9308-674a-48ca-a404-047094c8c902"
 HTTP = "cd3eb016-35fb-5094-929b-558a96fad6f3"
 LoggingExtras = "e6f89c97-d47a-5376-807f-9c37f3926c36"
+NodeJS_16_jll = "a4b94fbf-73f5-58ff-888d-48a8396e17f6"
 SHA = "ea8e919c-243c-51af-8825-aaa63cd721ce"
+Scratch = "6c6a2e73-6563-6170-7368-637461726353"
 Sockets = "6462fe0b-24de-5631-8697-dd941f90decc"
 URIs = "5c2747f8-b7ea-4ff2-ba2e-563bfd36b1d4"
+azurite_jll = "d59cea07-7a7b-5018-a298-a103d13afaf6"
+minio_jll = "ad83bbfc-c153-533a-bb97-700a7db721e0"
 
 [compat]
-CloudTest = "1"
 Figgy = "1"
 HTTP = "1"
 JSON3 = "1"
 LoggingExtras = "0.4"
 URIs = "1"
 julia = "1.6"
+NodeJS_16_jll = "16"
+Scratch = "1"
+azurite_jll = "3"
+minio_jll = "1"
 
 [extras]
-CloudTest = "37ac6dbb-5f5a-48fb-b8e0-db750e64b705"
 JSON3 = "0f8b85d8-7281-11e9-16c2-39a750bddbf1"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [targets]
-test = ["CloudTest", "JSON3", "Test"]
+test = ["JSON3", "Test"]

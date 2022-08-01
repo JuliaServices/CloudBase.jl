@@ -1,4 +1,4 @@
-using CloudBase, Test, CloudTest, JSON3, Dates, HTTP
+using CloudBase, Test, CloudBase.CloudTest, JSON3, Dates, HTTP
 
 @testset "AWSSigV4" begin
     file = abspath(joinpath(dirname(pathof(CloudBase)), "../test/resources/awsSig4Cases.json"))
@@ -9,10 +9,6 @@ using CloudBase, Test, CloudTest, JSON3, Dates, HTTP
     configs[:secret_access_key] = configs[:secretAccessKey]
     delete!(configs, :secretAccessKey)
     debug = false
-    # Note: known failures currently involve relative/path resolution issues
-    # where the request targets are like `/../foo/./bar`
-    # Ideally, we should upstream some functionality/normalization/resolution to the URIs.jl package
-    # but these cases are also probably very rare, so we'll just @test_skip them for now
     knownFailures = (19, 20, 23, 26)
     for (i, case) in enumerate(cases.tests.all)
         println("testing AWSSig4 case = $(case.name), i = $i")
@@ -37,25 +33,21 @@ end
 end
 
 @testset "AWS" begin
-    Minio.with() do
-        # create a bucket
-        AWS.put("http://127.0.0.1:50391/testbucket"; service="s3", access_key_id="minioadmin", secret_access_key="minioadmin")
+    Minio.with() do conf
+        port, bkt, acct, secret = conf.port, conf.bucket, conf.account, conf.secret
         csv = "a,b,c\n1,2,3\n4,5,$(rand())"
-        AWS.put("http://127.0.0.1:50391/testbucket/test.csv", [], csv; service="s3", access_key_id="minioadmin", secret_access_key="minioadmin")
-        resp = AWS.get("http://127.0.0.1:50391/testbucket/test.csv"; service="s3", access_key_id="minioadmin", secret_access_key="minioadmin")
+        AWS.put("http://127.0.0.1:$port/$bkt/test.csv", [], csv; service="s3", access_key_id=acct, secret_access_key=secret)
+        resp = AWS.get("http://127.0.0.1:$port/$bkt/test.csv"; service="s3", access_key_id=acct, secret_access_key=secret)
         @test String(resp.body) == csv
     end
 end
 
 @testset "Azure" begin
-    Azurite.with() do
-        # create a bucket
-        acct = "devstoreaccount1"
-        key = "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw=="
-        Azure.put("http://127.0.0.1:50393/$acct/testbucket?restype=container"; account=acct, key=key)
+    Azurite.with() do conf
+        port, bkt, acct, secret = conf.port, conf.bucket, conf.account, conf.secret
         csv = "a,b,c\n1,2,3\n4,5,$(rand())"
-        Azure.put("http://127.0.0.1:50393/$acct/testbucket/test", ["x-ms-blob-type" => "BlockBlob"], csv; account=acct, key=key)
-        resp = Azure.get("http://127.0.0.1:50393/$acct/testbucket/test"; account=acct, key=key)
+        Azure.put("http://127.0.0.1:$port/$acct/$bkt/test", ["x-ms-blob-type" => "BlockBlob"], csv; account=acct, key=secret)
+        resp = Azure.get("http://127.0.0.1:$port/$acct/$bkt/test"; account=acct, key=secret)
         @test String(resp.body) == csv
     end
 end
