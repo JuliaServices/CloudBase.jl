@@ -8,19 +8,20 @@ struct Config
     bucket::String
     account::String
     secret::String
+    process
 end
 
-using Sockets
+using Sockets, Random
 
 const FIND_OPEN_PORT_LOCK = ReentrantLock()
 
-function findOpenPort()
-    port, socket = Sockets.listenany(IPv4(0), rand(10000:50000))
+function findOpenPort(_)
+    port, socket = Sockets.listenany(IPv4(0), rand(RandomDevice(), 10000:50000))
     close(socket)
     return Int(port)
 end
 
-function findNOpenPorts(f, n)
+function findOpenPorts(f, n)
     # hold a global lock while finding open ports so concurrent `Minio.with`
     # `Azurite.with` calls don't conflict, which isn't likely since we're
     # starting from random ports but just in case! We also want to execute `f`
@@ -28,20 +29,14 @@ function findNOpenPorts(f, n)
     # server *on* those open ports before we return, then a subsequent `with`
     # call won't find those open ports
     Base.@lock FIND_OPEN_PORT_LOCK begin
-        if n == 2
-            return f((findOpenPort(), findOpenPort()))
-        elseif n == 3
-            return f((findOpenPort(), findOpenPort(), findOpenPort()))
-        else
-            error("unreachable")
-        end
+        return f(ntuple(findOpenPort, n))
     end
 end
 
 module Minio
 
-using minio_jll, Scratch, Sockets
-import ..Config, ..FIND_OPEN_PORT_LOCK, ..findOpenPort, ...AWS
+using minio_jll, Scratch
+import ..Config, ..findOpenPorts, ...AWS
 
 # minio server directory, populated in __init__
 const MINIO_DIR = Ref{String}()
@@ -52,6 +47,15 @@ function with(f; dir=nothing, bucket=nothing, public=false)
         f(config)
     finally
         kill(proc)
+        i = 0
+        while !success(proc)
+            sleep(0.1)
+            i += 1
+            if i > 100
+                @warn "minio server process didn't exit as expected within 10 seconds"
+                break # give up waiting for process to finish
+            end
+        end
         rm(config.dir; force=true, recursive=true)
     end
     return
@@ -64,19 +68,18 @@ function run(dir=nothing, bucket=nothing, public=false)
     else !isdir(dir)
         throw(ArgumentError("provided minio directory `$dir` doesn't exist; can't run minio server"))
     end
-    # p, port = Base.@lock FIND_OPEN_PORT_LOCK begin
-    port, cport = findOpenPort(), findOpenPort()
-    @show port, cport
-    cmd = `$(minio_jll.minio()) server $dir --address :$(port) --console-address :$(cport)`
-    p = Base.run(cmd; wait=false)
-    sleep(0.25) # sleep just a little for server startup
-    #     p, port
-    # end
+    p, port = findOpenPorts(2) do ports
+        port, cport = ports
+        cmd = `$(minio_jll.minio()) server $dir --address :$(port) --console-address :$(cport)`
+        p = Base.run(cmd; wait=false)
+        sleep(0.25) # sleep just a little for server startup
+        return p, port
+    end
     bkt = something(bucket, "jl-minio-$(abs(rand(Int16)))")
     headers = public ? ["X-Amz-Acl" => "public-read-write"] : []
     resp = AWS.put("http://127.0.0.1:$(port)/$bkt", headers; service="s3", access_key_id="minioadmin", secret_access_key="minioadmin")
     resp.status == 200 || throw(ArgumentError("unable to create minio bucket `$bkt`"))
-    return Config(port, dir, bkt, "minioadmin", "minioadmin"), p
+    return Config(port, dir, bkt, "minioadmin", "minioadmin", p), p
 end
 
 function __init__()
@@ -88,8 +91,8 @@ end # module Minio
 
 module Azurite
 
-using NodeJS_16_jll, azurite_jll, Scratch, Sockets
-import ..Config, ..findNOpenPorts, ...Azure
+using NodeJS_16_jll, azurite_jll, Scratch
+import ..Config, ..findOpenPorts, ...Azure
 
 # azurite server directory, populated in __init__
 const AZURITE_DIR = Ref{String}()
@@ -100,6 +103,15 @@ function with(f; dir=nothing, container=nothing, public=false)
         f(config)
     finally
         kill(proc)
+        i = 0
+        while !success(proc)
+            sleep(0.1)
+            i += 1
+            if i > 100
+                @warn "azurite server process didn't exit as expected within 10 seconds"
+                break # give up waiting for process to finish
+            end
+        end
         rm(config.dir; force=true, recursive=true)
     end
     return
@@ -112,22 +124,20 @@ function run(dir=nothing, container=nothing, public=false)
     else !isdir(dir)
         throw(ArgumentError("provided azurite directory `$dir` doesn't exist; can't run azurite server"))
     end
-    p, port = findNOpenPorts(3) do ports
-        @show ports
+    p, port = findOpenPorts(3) do ports
         port, qport, tport = ports
         cmd = `$(node()) $(azurite) -l $dir -d $(joinpath(dir, "debug.log")) --blobPort $port --queuePort $qport --tablePort $tport`
         p = Base.run(cmd; wait=false)
         sleep(0.25) # sleep just a little for server startup
-        # @show success(p)
         return p, port
     end
     bkt = something(container, "jl-azurite-$(abs(rand(Int16)))")
     acct = "devstoreaccount1"
     key = "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw=="
     headers = public ? ["x-ms-blob-public-access" => "container"] : []
-    resp = Azure.put("http://127.0.0.1:$port/$acct/$bkt?restype=container", headers; account=acct, key=key, verbose=2)
-    resp.status == 200 || throw(ArgumentError("unable to create azurite container `$bkt`"))
-    return Config(port, dir, bkt, acct, key), p
+    resp = Azure.put("http://127.0.0.1:$port/$acct/$bkt?restype=container", headers; account=acct, key=key)
+    resp.status == 201 || throw(ArgumentError("unable to create azurite container `$bkt`"))
+    return Config(port, dir, bkt, acct, key, p), p
 end
 
 function __init__()

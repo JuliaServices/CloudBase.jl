@@ -32,23 +32,60 @@ end
     @test req.body["Signature"] == "wseguMzBRgA/4/fan8ZwEa0PIF+ws4WFbTJcG1ts5RY="
 end
 
-@testset "AWS" begin
+@time @testset "AWS" begin
+    config = Ref{Any}()
     Minio.with() do conf
+        config[] = conf
         port, bkt, acct, secret = conf.port, conf.bucket, conf.account, conf.secret
         csv = "a,b,c\n1,2,3\n4,5,$(rand())"
         AWS.put("http://127.0.0.1:$port/$bkt/test.csv", [], csv; service="s3", access_key_id=acct, secret_access_key=secret)
         resp = AWS.get("http://127.0.0.1:$port/$bkt/test.csv"; service="s3", access_key_id=acct, secret_access_key=secret)
         @test String(resp.body) == csv
     end
+    @test !isdir(config[].dir)
+    @test success(config[].process)
 end
 
-@testset "Azure" begin
+@time @testset "Azure" begin
+    config = Ref{Any}()
     Azurite.with() do conf
+        config[] = conf
         port, bkt, acct, secret = conf.port, conf.bucket, conf.account, conf.secret
         csv = "a,b,c\n1,2,3\n4,5,$(rand())"
         Azure.put("http://127.0.0.1:$port/$acct/$bkt/test", ["x-ms-blob-type" => "BlockBlob"], csv; account=acct, key=secret)
         resp = Azure.get("http://127.0.0.1:$port/$acct/$bkt/test"; account=acct, key=secret)
         @test String(resp.body) == csv
+    end
+    @test !isdir(config[].dir)
+    @test success(config[].process)
+end
+
+@testset "Concurrent Minio/Azurite test servers" begin
+    mconfigs = Vector{Any}(undef, 10)
+    aconfigs = Vector{Any}(undef, 10)
+    @sync for i = 1:10
+        @async Minio.with() do conf
+            mconfigs[i] = conf
+            port, bkt, acct, secret = conf.port, conf.bucket, conf.account, conf.secret
+            csv = "a,b,c\n1,2,3\n4,5,$(rand())"
+            AWS.put("http://127.0.0.1:$port/$bkt/test.csv", [], csv; service="s3", access_key_id=acct, secret_access_key=secret)
+            resp = AWS.get("http://127.0.0.1:$port/$bkt/test.csv"; service="s3", access_key_id=acct, secret_access_key=secret)
+            @test String(resp.body) == csv
+        end
+        @async Azurite.with() do conf
+            aconfigs[i] = conf
+            port, bkt, acct, secret = conf.port, conf.bucket, conf.account, conf.secret
+            csv = "a,b,c\n1,2,3\n4,5,$(rand())"
+            Azure.put("http://127.0.0.1:$port/$acct/$bkt/test", ["x-ms-blob-type" => "BlockBlob"], csv; account=acct, key=secret)
+            resp = Azure.get("http://127.0.0.1:$port/$acct/$bkt/test"; account=acct, key=secret)
+            @test String(resp.body) == csv
+        end
+    end
+    for i = 1:10
+        @test !isdir(mconfigs[i].dir)
+        @test success(mconfigs[i].process)
+        @test !isdir(aconfigs[i].dir)
+        @test success(aconfigs[i].process)
     end
 end
 
