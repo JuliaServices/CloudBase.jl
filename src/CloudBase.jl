@@ -1,11 +1,12 @@
 module CloudBase
 
-export CloudTest, AWS, Azure
+export CloudTest
 
 using Dates, Base64, Sockets
 using HTTP, URIs, SHA, LoggingExtras, Figgy
 
-abstract type CloudCredentials end
+abstract type CloudAccount end
+abstract type AbstractStore end
 
 _some(x, y) = x === nothing ? y : x
 
@@ -41,11 +42,23 @@ end
 module AWS
 
 using HTTP
-import ..cloudsignlayer
+import ..cloudsignlayer, ..AWSAccount, ..AbstractStore, ..AWS_DEFAULT_REGION
 
 awslayer(handler) = (req; kw...) -> handler(req; aws=true, kw...)
 
 HTTP.@client (first=(awslayer,), last=()) (first=(), last=(cloudsignlayer,))
+
+const Account = AWSAccount
+
+struct Bucket <: AbstractStore
+    name::String
+    baseurl::String
+
+    function Bucket(name::String, region::String=AWS_DEFAULT_REGION; host::Union{Nothing, String}=nothing)
+        baseurl = host === nothing ? "https://$name.s3.$region.amazonaws.com/" : "$host/$name/"
+        return new(name, baseurl)
+    end
+end
 
 end # module AWS
 
@@ -60,12 +73,6 @@ azurelayer(handler) = (req; kw...) -> handler(req; azure=true, kw...)
 HTTP.@client (first=(azurelayer,), last=()) (first=(), last=(cloudsignlayer,))
 
 end # module Azure
-
-function __init__()
-    awsLoadConfig!()
-    azureLoadConfig!()
-    return
-end
 
 include("CloudTest.jl")
 

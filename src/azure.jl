@@ -1,4 +1,4 @@
-struct AzureCredentials <: CloudCredentials
+struct AzureCredentials <: CloudAccount
     account::String
     key::String
 end

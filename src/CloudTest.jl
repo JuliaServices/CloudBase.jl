@@ -2,12 +2,13 @@ module CloudTest
 
 export Minio, Azurite, ECS, EC2
 
+import ..CloudAccount, ..AWS, ..Azure, ..AbstractStore
+
 struct Config
+    account::CloudAccount
+    store::AbstractStore
     port::Int
     dir::String
-    bucket::String
-    account::String
-    secret::String
     process
 end
 
@@ -75,11 +76,12 @@ function run(dir=nothing, bucket=nothing, public=false)
         sleep(0.25) # sleep just a little for server startup
         return p, port
     end
-    bkt = something(bucket, "jl-minio-$(abs(rand(Int16)))")
+    account = AWS.Account("minioadmin", "minioadmin")
+    bkt = AWS.Bucket(something(bucket, "jl-minio-$(abs(rand(Int16)))"); host="http://127.0.0.1:$port")
     headers = public ? ["X-Amz-Acl" => "public-read-write"] : []
-    resp = AWS.put("http://127.0.0.1:$(port)/$bkt", headers; service="s3", access_key_id="minioadmin", secret_access_key="minioadmin")
+    resp = AWS.put(bkt.baseurl, headers; service="s3", account)
     resp.status == 200 || throw(ArgumentError("unable to create minio bucket `$bkt`"))
-    return Config(port, dir, bkt, "minioadmin", "minioadmin", p), p
+    return Config(account, bkt, port, dir, p), p
 end
 
 function __init__()

@@ -1,12 +1,81 @@
+const AWS_CONFIGS = Figgy.Store()
 
-struct AWSCredentials <: CloudCredentials
+mutable struct AWSAccount <: CloudAccount
+    lock::ReentrantLock
+    profile::String
     access_key_id::String
     secret_access_key::String
     session_token::String
+    expiration::Union{Nothing, DateTime}
+    expireThreshold::Dates.Period
 end
 
-#TODO: should we cache configs to a Scratch space for fast restarts?
-const AWS_CONFIGS = Figgy.Store()
+AWSAccount(profile::String, access_key_id::String, secret_access_key::String, session_token::String, expiration, expireThreshold) =
+    AWSAccount(ReentrantLock(), profile, access_key_id, secret_access_key, session_token, expiration, expireThreshold)
+
+# manual constructor
+AWSAccount(access_key_id::String, secret_access_key::String, session_token::String="", expiration=nothing; expireThreshold::Dates.Period=Dates.Minute(5)) =
+    AWSAccount("", access_key_id, secret_access_key, session_token, expiration, expireThreshold)
+
+expired(x::AWSAccount) = x.expiration !== nothing && Dates.now(Dates.UTC) > (x.expiration - x.expireThreshold)
+
+function credentials(x::AWSAccount)
+    Base.@lock x.lock begin
+        if expired(x)
+            creds = loadAndGetCreds!(x.profile)
+            x.access_key_id = creds.access_key_id
+            x.secret_access_key = creds.secret_access_key
+            x.session_token = creds.session_token
+            x.expiration = creds.expiration
+        end
+        return (access_key_id=x.access_key_id, secret_access_key=x.secret_access_key, session_token=x.session_token)
+    end
+end
+
+function loadAndGetCreds!(profile::String="")
+    awsLoadConfig!(profile)
+    exp = get(AWS_CONFIGS, "exp", nothing)
+    expiration = exp === nothing ? exp : DateTime(rstrip(exp, 'Z'))
+    return (
+        access_key_id=get(AWS_CONFIGS, "aws_access_key_id", ""),
+        secret_access_key=get(AWS_CONFIGS, "aws_secret_access_key", ""),
+        session_token=get(AWS_CONFIGS, "aws_session_token", ""),
+        expiration,
+    )
+end
+
+function AWSAccount(profile::String=""; expireThreshold=Dates.Minute(5))
+    creds = loadAndGetCreds!(profile)
+    return AWSAccount(profile, creds.access_key_id, creds.secret_access_key, creds.session_token, expiration, expireThreshold)
+end
+
+getCredentialsFile() = get(AWS_CONFIGS, "aws_shared_credentials_file", joinpath(homedir(), ".aws", "credentials"))
+getConfigFile() = get(AWS_CONFIGS, "aws_config_file", joinpath(homedir(), ".aws", "config")) 
+
+function awsLoadConfig!(profile::String="")
+    # first we load alternative config file locations & profile
+    # in case we should use those instead of defaults
+    Figgy.load!(AWS_CONFIGS, alternateConfigFileLocations(), awsProfileProgramArgument())
+    # now we do our full load
+    credFile = getCredentialsFile()
+    configFile = getConfigFile()
+    profile = !isempty(profile) ? profile : get(AWS_CONFIGS, "profile", "default")
+    if profile != "default"
+        profile = "profile $profile"
+    end
+    Figgy.load!(AWS_CONFIGS,
+        awsProgramArguments(),
+        awsConfigEnvironmentVariables(),
+        Figgy.IniFile(credFile, profile),
+        Figgy.IniFile(configFile, profile),
+        ECSCredentials(),
+        EC2Credentials(),
+    )
+    if haskey(AWS_CONFIGS, "role_arn")
+        loadRoleArn(AWS_CONFIGS["role_arn"], credFile, configFile)
+    end
+    return
+end
 
 alternateConfigFileLocations() = Figgy.kmap(Figgy.EnvironmentVariables(),
     "AWS_CONFIG_FILE" => "aws_config_file",
@@ -83,7 +152,7 @@ function Figgy.load(x::EC2Credentials)
 end
 reloadEC2Credentials!(ecsHost="169.254.169.254", port=80) = Figgy.load!(AWS_CONFIGS, EC2Credentials(ecsHost, port))
 
-function loadRoleArn(roleArn)
+function loadRoleArn(roleArn, credFile, configFile)
     # with role_arn, we're going to call STS for temporary creds
     # so we need to figure out where our source creds come from
     params = Dict("RoleArn" => roleArn)
@@ -121,7 +190,7 @@ function loadRoleArn(roleArn)
     Figgy.load!(AWS_CONFIGS, Figgy.kmap(Figgy.XmlObject(resp.body, "AssumeRoleResult.Credentials"),
         "AccessKeyId" => "aws_access_key_id",
         "SecretAccessKey" => "aws_secret_access_key",
-        "Token" => "aws_session_token",
+        "SessionToken" => "aws_session_token",
         "Expiration" => "expiration",
     ))
 end
@@ -130,28 +199,6 @@ end
 #TODO: respect max_attempts
 #TODO: respect credential_source
 
-function awsLoadConfig!()
-    # first we load alternative config file locations & profile
-    # in case we should use those instead of defaults
-    Figgy.load!(AWS_CONFIGS, alternateConfigFileLocations(), awsProfileProgramArgument())
-    # now we do our full load
-    credFile = get(AWS_CONFIGS, "aws_shared_credentials_file", joinpath(homedir(), ".aws", "credentials"))
-    configFile = get(AWS_CONFIGS, "aws_config_file", joinpath(homedir(), ".aws", "config"))
-    profile = get(AWS_CONFIGS, "profile", "default")
-    Figgy.load!(AWS_CONFIGS,
-        awsProgramArguments(),
-        awsConfigEnvironmentVariables(),
-        Figgy.IniFile(credFile, profile),
-        Figgy.IniFile(configFile, profile),
-        ECSCredentials(),
-        EC2Credentials(),
-    )
-    if haskey(AWS_CONFIGS, "role_arn")
-        loadRoleArn(AWS_CONFIGS["role_arn"])
-    end
-    return
-end
-
 const AWS_DEFAULT_REGION = "us-east-1"
 
 # try to get service/region from host directly (otherwise, require user to pass service)
@@ -159,9 +206,12 @@ const AWS_DEFAULT_REGION = "us-east-1"
 # "amazonaws.com"
 # "s3.amazonaws.com"
 # "s3.us-west-2.amazonaws.com"
+# "bucket.s3.us-west-2.amazonaws.com"
 function urlServiceRegion(host)
     spl = split(host, '.')
-    if length(spl) == 4 && !all(isdigit, spl[1]) && !all(isdigit, spl[2])
+    if length(spl) == 5 && !all(isdigit, spl[2]) && !all(isdigit, spl[3])
+        return (spl[2], spl[3])
+    elseif length(spl) == 4 && !all(isdigit, spl[1]) && !all(isdigit, spl[2])
         # got service & region
         return (spl[1], spl[2])
     elseif length(spl) == 3 && !all(isdigit, spl[1])
@@ -181,26 +231,6 @@ const ISO8601DATE = dateformat"yyyymmdd"
 const SIG2DF = dateformat"yyyy-mm-dd\THH:MM:SS\Z"
 const SIG2DFNOZ = dateformat"yyyy-mm-dd\THH:MM:SS"
 
-function computeCredentials(access_key_id=nothing, secret_access_key=nothing, session_token=nothing)
-    userProvided = access_key_id !== nothing && secret_access_key !== nothing
-    access_key_id = _some(access_key_id, get(AWS_CONFIGS, "aws_access_key_id", nothing))
-    secret_access_key = _some(secret_access_key, get(AWS_CONFIGS, "aws_secret_access_key", nothing))
-    session_token = _some(session_token, get(AWS_CONFIGS, "aws_session_token", ""))
-    access_key_id === nothing && throw(ArgumentError("unable to determine AWS access key id for request; pass `aws_access_key_id=X`"))
-    secret_access_key === nothing && throw(ArgumentError("unable to determine AWS secret access key for request; pass `aws_secret_access_key=X`"))
-    expired = false
-    if !userProvided && haskey(AWS_CONFIGS, "expiration")
-        # quick check if creds have expired
-        exp = DateTime(rstrip(AWS_CONFIGS["expiration"], "Z"))
-        if exp - now(UTC) < Dates.Minute(5)
-            # creds will expire within 5 minutes, let's refresh
-            awsLoadConfig!()
-            expired = true
-        end
-    end
-    return AWSCredentials(access_key_id, secret_access_key, session_token), expired
-end
-
 # codeunit iterator for Char
 struct CodeUnits
     c::Char
@@ -211,7 +241,7 @@ Base.iterate(c::CodeUnits, i=1) = i > ncodeunits(c.c) ? nothing :
 
 safe(c::Char) = c == '-' || c == '_' || c == '.' || c == '~' || ('A' <= c <= 'Z') || ('a' <= c <= 'z') || ('0' <= c <= '9')
 uriencode(c::Char) = join((string('%', uppercase(string(Int(b), base=16, pad=2))) for b in CodeUnits(c)))
-uriencode(x) = join(safe(c) ? c : uriencode(c) for c in x)
+uriencode(x, path=false) = join((safe(c) || (path && c == '/')) ? c : uriencode(c) for c in x)
 
 function deduplicateHeaders!(headers)
     j = 1
@@ -231,10 +261,10 @@ function deduplicateHeaders!(headers)
     return
 end
 
-function awssign!(request::HTTP.Request; service=nothing, region=nothing, access_key_id=nothing, secret_access_key=nothing, session_token=nothing, x_amz_date=nothing, includeContentSha256=true, debug=false, kw...)
+function awssign!(request::HTTP.Request; service=nothing, region=nothing, account::Union{Nothing, AWSAccount}=nothing, x_amz_date=nothing, includeContentSha256=true, debug=false, kw...)
     if debug
         return LoggingExtras.withlevel(Logging.Debug; verbosity=1) do
-            awssign!(request; service, region, access_key_id, secret_access_key, session_token, x_amz_date, kw...)
+            awssign!(request; service, region, access_key_id, secret_access_key, session_token, x_amz_date, includeContentSha256, kw...)
         end
     end
     # determine the service & region for the request (needed for signing)
@@ -243,9 +273,10 @@ function awssign!(request::HTTP.Request; service=nothing, region=nothing, access
     service === nothing && ArgumentError("unable to determine AWS service for request; pass `service=X`")
     region = something(reg, region, get(AWS_CONFIGS, "region", AWS_DEFAULT_REGION))
     @debugv 1 "computed service = `$service`, region = `$region` for aws request"
+    # if the account is empty, let's assume this is for a public request, so no signing required
+    account === nothing && return
     # determine credentials
-    creds, expired = computeCredentials(access_key_id, secret_access_key, session_token)
-    expired && return awssign!(request; service, region, access_key_id, secret_access_key, session_token, kw...)
+    creds = credentials(account)
     # we're going to set Authorization header, so delete it if present
     HTTP.removeheader(request, "Authorization")
     dt = x_amz_date === nothing ? Dates.now(Dates.UTC) : x_amz_date
@@ -258,18 +289,19 @@ function awssign!(request::HTTP.Request; service=nothing, region=nothing, access
     # https://docs.aws.amazon.com/general/latest/gr/sigv4_signing.html
     # Task 1: Create a canonical request for Signature Version 4
     service = lowercase(service)
-    canonicalURI = URIs.normpath((service == "s3" || service == "service") ? request.url.path : escapepath(request.url.path))
+    canonicalURI = URIs.normpath((service == "s3" || service == "service") ? uriencode(request.url.path, true) : escapepath(request.url.path))
     # @show canonicalURI
     canonicalQueryString = join((string(uriencode(k), "=", uriencode(v)) for (k, v) in sort!(queryparampairs(request.url); by=x->"$(x[1])$(x[2])")), "&")
-    # @show canonicalQueryString
+    # @show request.url, queryparampairs(request.url), canonicalQueryString
     headers = sort!(map(canonicalHeader, request.headers); by=x->x.first)
     deduplicateHeaders!(headers)
     # @show headers
     canonicalHeaders = join(map(x -> "$(x.first):$(x.second)", headers), "\n")
     signedHeaders = join(map(first, headers), ";")
-    @assert HTTP.isbytes(request.body)
+    @assert HTTP.isbytes(request.body) || request.body isa Union{Dict, NamedTuple}
+    body = HTTP.isbytes(request.body) ? request.body : HTTP.escapeuri(request.body)
     #TODO: handle streaming request bodies
-    payloadHash = bytes2hex(sha256(request.body))
+    payloadHash = bytes2hex(sha256(body))
     if includeContentSha256
         HTTP.setheader(request, "x-amz-content-sha256" => payloadHash)
     end
@@ -281,6 +313,7 @@ function awssign!(request::HTTP.Request; service=nothing, region=nothing, access
 
     $signedHeaders
     $payloadHash"""
+    # @show canonicalRequest
     @debugv 1 "computed canonical request = `$canonicalRequest`"
     hashedCanonicalRequest = bytes2hex(sha256(canonicalRequest))
     # Task 2: Create a string to sign for Signature Version 4
@@ -300,7 +333,8 @@ function awssign!(request::HTTP.Request; service=nothing, region=nothing, access
     return
 end
 
-function awssignv2!(request::HTTP.Request; access_key_id=nothing, secret_access_key=nothing, session_token=nothing, version=nothing, timestamp=nothing, kw...)
+function awssignv2!(request::HTTP.Request; account::Union{Nothing, AWSAccount}=nothing, version=nothing, timestamp=nothing, kw...)
+    account === nothing && return
     if request.method == "GET"
         params = queryparams(request.url)
     else
@@ -309,8 +343,7 @@ function awssignv2!(request::HTTP.Request; access_key_id=nothing, secret_access_
         params = Dict(string(k) => v for (k, v) in pairs(request.body))
     end
     # determine credentials
-    creds, expired = computeCredentials(access_key_id, secret_access_key, session_token)
-    expired && return awssignv2!(request; service, region, access_key_id, secret_access_key, session_token, kw...)
+    creds = credentials(account)
     params["AWSAccessKeyId"] = creds.access_key_id
     params["SignatureVersion"] = "2"
     params["SignatureMethod"] = "HmacSHA256"

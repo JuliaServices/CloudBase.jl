@@ -4,9 +4,8 @@ using CloudBase, Test, CloudBase.CloudTest, JSON3, Dates, HTTP
     file = abspath(joinpath(dirname(pathof(CloudBase)), "../test/resources/awsSig4Cases.json"))
     cases = JSON3.read(read(file))
     configs = copy(cases.config)
-    configs[:access_key_id] = configs[:accessKeyId]
+    configs[:account] = CloudBase.AWSAccount(configs[:accessKeyId], configs[:secretAccessKey])
     delete!(configs, :accessKeyId)
-    configs[:secret_access_key] = configs[:secretAccessKey]
     delete!(configs, :secretAccessKey)
     debug = false
     knownFailures = (19, 20, 23, 26)
@@ -24,11 +23,12 @@ end
 
 @testset "AWSSigV2" begin
     req = HTTP.Request("GET", "/?Action=DescribeJobFlows"; url=HTTP.URI("https://elasticmapreduce.amazonaws.com?Action=DescribeJobFlows"))
-    CloudBase.awssignv2!(req; access_key_id="AKIAIOSFODNN7EXAMPLE", secret_access_key="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", timestamp=DateTime(2011, 10, 3, 15, 19, 30), version="2009-03-31")
+    account = CloudBase.AWSAccount("AKIAIOSFODNN7EXAMPLE", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY")
+    CloudBase.awssignv2!(req; account, timestamp=DateTime(2011, 10, 3, 15, 19, 30), version="2009-03-31")
     @test req.target ==
         "?AWSAccessKeyId=AKIAIOSFODNN7EXAMPLE&Action=DescribeJobFlows&SignatureMethod=HmacSHA256&SignatureVersion=2&Timestamp=2011-10-03T15%3A19%3A30&Version=2009-03-31&Signature=i91nKc4PWAt0JJIdXwz9HxZCJDdiy6cf%2FMj6vPxyYIs%3D"
     req = HTTP.Request("POST", "/", [], Dict("Action" => "DescribeJobFlows"); url=HTTP.URI("https://elasticmapreduce.amazonaws.com"))
-    CloudBase.awssignv2!(req; access_key_id="AKIAIOSFODNN7EXAMPLE", secret_access_key="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", timestamp=DateTime(2011, 10, 3, 15, 19, 30), version="2009-03-31")
+    CloudBase.awssignv2!(req; account, timestamp=DateTime(2011, 10, 3, 15, 19, 30), version="2009-03-31")
     @test req.body["Signature"] == "wseguMzBRgA/4/fan8ZwEa0PIF+ws4WFbTJcG1ts5RY="
 end
 
@@ -36,10 +36,10 @@ end
     config = Ref{Any}()
     Minio.with() do conf
         config[] = conf
-        port, bkt, acct, secret = conf.port, conf.bucket, conf.account, conf.secret
+        account, bucket = conf.account, conf.store
         csv = "a,b,c\n1,2,3\n4,5,$(rand())"
-        AWS.put("http://127.0.0.1:$port/$bkt/test.csv", [], csv; service="s3", access_key_id=acct, secret_access_key=secret)
-        resp = AWS.get("http://127.0.0.1:$port/$bkt/test.csv"; service="s3", access_key_id=acct, secret_access_key=secret)
+        AWS.put("$(bucket.baseurl)/test.csv", [], csv; service="s3", account)
+        resp = AWS.get("$(bucket.baseurl)/test.csv"; service="s3", account)
         @test String(resp.body) == csv
     end
     @test !isdir(config[].dir)
