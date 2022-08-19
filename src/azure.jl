@@ -85,7 +85,8 @@ function azureLoadConfig!()
         Figgy.IniFile(configFile, "defaults"),
         Figgy.IniFile(configFile, "storage"),
         AzureVMCredentialsSource(),
-        #TODO: support oauth w/ client id/client secret; need to run azurite as https
+        #TODO: support oauth w/ client id/client secret
+        # https://docs.microsoft.com/en-us/azure/active-directory/develop/scenario-daemon-acquire-token?tabs=dotnet
     )
 end
 

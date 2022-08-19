@@ -19,7 +19,7 @@ azurite_jll = "d59cea07-7a7b-5018-a298-a103d13afaf6"
 minio_jll = "ad83bbfc-c153-533a-bb97-700a7db721e0"
 
 [compat]
-Figgy = "1"
+Figgy = "1.1"
 HTTP = "1"
 JSON3 = "1"
 LoggingExtras = "0.4"

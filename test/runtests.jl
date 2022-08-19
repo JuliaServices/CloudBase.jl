@@ -1,6 +1,8 @@
 using CloudBase, Test, CloudBase.CloudTest, JSON3, Dates, HTTP
 using CloudBase: AWS, Azure
 
+const x32bit = Sys.WORD_SIZE == 32
+
 @testset "AWSSigV4" begin
     file = abspath(joinpath(dirname(pathof(CloudBase)), "../test/resources/awsSig4Cases.json"))
     cases = JSON3.read(read(file))
@@ -47,6 +49,7 @@ end
     @test success(config[].process)
 end
 
+if !x32bit
 @time @testset "Azure" begin
     config = Ref{Any}()
     Azurite.with(startupDelay=3) do conf
@@ -59,6 +62,7 @@ end
     end
     @test !isdir(config[].dir)
     @test success(config[].process)
+end
 end
 
 @testset "Concurrent Minio/Azurite test servers" begin
@@ -73,20 +77,24 @@ end
             resp = AWS.get("$(bucket.baseurl)test.csv"; service="s3", account)
             @test String(resp.body) == csv
         end
-        @async Azurite.with(startupDelay=3) do conf
-            aconfigs[i] = conf
-            account, container = conf
-            csv = "a,b,c\n1,2,3\n4,5,$(rand())"
-            Azure.put("$(container.baseurl)test", ["x-ms-blob-type" => "BlockBlob"], csv; account, require_ssl_verification=false)
-            resp = Azure.get("$(container.baseurl)test"; account, require_ssl_verification=false)
-            @test String(resp.body) == csv
+        if !x32bit
+            @async Azurite.with(startupDelay=3) do conf
+                aconfigs[i] = conf
+                account, container = conf
+                csv = "a,b,c\n1,2,3\n4,5,$(rand())"
+                Azure.put("$(container.baseurl)test", ["x-ms-blob-type" => "BlockBlob"], csv; account, require_ssl_verification=false)
+                resp = Azure.get("$(container.baseurl)test"; account, require_ssl_verification=false)
+                @test String(resp.body) == csv
+            end
         end
     end
     for i = 1:10
         @test !isdir(mconfigs[i].dir)
         @test success(mconfigs[i].process)
-        @test !isdir(aconfigs[i].dir)
-        @test success(aconfigs[i].process)
+        if !x32bit
+            @test !isdir(aconfigs[i].dir)
+            @test success(aconfigs[i].process)
+        end
     end
 end
 
