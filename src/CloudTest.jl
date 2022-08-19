@@ -1,6 +1,6 @@
 module CloudTest
 
-export Minio, Azurite, ECS, EC2
+export Minio, Azurite, ECS, EC2, AzureVM
 
 import ..CloudAccount, ..AWS, ..Azure, ..AbstractStore
 
@@ -11,6 +11,8 @@ struct Config
     dir::String
     process
 end
+
+Base.iterate(x::Config, i=1) = i == 1 ? (x.account, 2) : i == 2 ? (x.store, 3) : nothing
 
 using Sockets, Random
 
@@ -42,8 +44,8 @@ import ..Config, ..findOpenPorts, ...AWS
 # minio server directory, populated in __init__
 const MINIO_DIR = Ref{String}()
 
-function with(f; dir=nothing, bucket=nothing, public=false)
-    config, proc = run(dir, bucket, public)
+function with(f; dir=nothing, bucket=nothing, public=false, startupDelay=0.25, debug=false)
+    config, proc = run(dir, bucket, public, startupDelay, debug)
     try
         f(config)
     finally
@@ -62,7 +64,7 @@ function with(f; dir=nothing, bucket=nothing, public=false)
     return
 end
 
-function run(dir=nothing, bucket=nothing, public=false)
+function run(dir=nothing, bucket=nothing, public=false, startupDelay=0.25, debug=false)
     isdefined(MINIO_DIR, :x) || throw(ArgumentError("minio scratch space not automatically populated; can't run minio server"))
     if dir === nothing
         dir = mktempdir(MINIO_DIR[])
@@ -72,14 +74,14 @@ function run(dir=nothing, bucket=nothing, public=false)
     p, port = findOpenPorts(2) do ports
         port, cport = ports
         cmd = `$(minio_jll.minio()) server $dir --address :$(port) --console-address :$(cport)`
-        p = Base.run(cmd; wait=false)
-        sleep(0.25) # sleep just a little for server startup
+        p = debug ? Base.run(cmd, devnull, stderr, stderr; wait=false) : Base.run(cmd; wait=false)
+        sleep(startupDelay) # sleep just a little for server startup
         return p, port
     end
-    account = AWS.Account("minioadmin", "minioadmin")
+    account = AWS.Credentials("minioadmin", "minioadmin")
     bkt = AWS.Bucket(something(bucket, "jl-minio-$(abs(rand(Int16)))"); host="http://127.0.0.1:$port")
     headers = public ? ["X-Amz-Acl" => "public-read-write"] : []
-    resp = AWS.put(bkt.baseurl, headers; service="s3", account)
+    resp = AWS.put(bkt.baseurl, headers; service="s3", account, status_exception=false)
     resp.status == 200 || throw(ArgumentError("unable to create minio bucket `$bkt`"))
     return Config(account, bkt, port, dir, p), p
 end
@@ -99,8 +101,8 @@ import ..Config, ..findOpenPorts, ...Azure
 # azurite server directory, populated in __init__
 const AZURITE_DIR = Ref{String}()
 
-function with(f; dir=nothing, container=nothing, public=false)
-    config, proc = run(dir, container, public)
+function with(f; dir=nothing, container=nothing, public=false, startupDelay=0.25, debug=false)
+    config, proc = run(dir, container, public, startupDelay, debug)
     try
         f(config)
     finally
@@ -119,7 +121,7 @@ function with(f; dir=nothing, container=nothing, public=false)
     return
 end
 
-function run(dir=nothing, container=nothing, public=false)
+function run(dir=nothing, container=nothing, public=false, startupDelay=0.25, debug=false)
     isdefined(AZURITE_DIR, :x) || throw(ArgumentError("azurite scratch space not automatically populated; can't run azurite server"))
     if dir === nothing
         dir = mktempdir(AZURITE_DIR[])
@@ -128,18 +130,21 @@ function run(dir=nothing, container=nothing, public=false)
     end
     p, port = findOpenPorts(3) do ports
         port, qport, tport = ports
-        cmd = `$(node()) $(azurite) -l $dir -d $(joinpath(dir, "debug.log")) --blobPort $port --queuePort $qport --tablePort $tport`
-        p = Base.run(cmd; wait=false)
-        sleep(0.25) # sleep just a little for server startup
+        cert = joinpath(@__DIR__, "test.cert")
+        key = joinpath(@__DIR__, "test.key")
+        cmd = `$(node()) $(azurite) -l $dir -d $(joinpath(dir, "debug.log")) --blobPort $port --queuePort $qport --tablePort $tport --cert $cert --key $key --oauth basic`
+        p = debug ? Base.run(cmd, devnull, stderr, stderr; wait=false) : Base.run(cmd; wait=false)
+        sleep(startupDelay) # sleep just a little for server startup
         return p, port
     end
-    bkt = something(container, "jl-azurite-$(abs(rand(Int16)))")
     acct = "devstoreaccount1"
+    cont = Azure.Container(something(container, "jl-azurite-$(abs(rand(Int16)))"), acct; host="https://127.0.0.1:$port")
     key = "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw=="
+    account = Azure.Credentials(acct, key)
     headers = public ? ["x-ms-blob-public-access" => "container"] : []
-    resp = Azure.put("http://127.0.0.1:$port/$acct/$bkt?restype=container", headers; account=acct, key=key)
-    resp.status == 201 || throw(ArgumentError("unable to create azurite container `$bkt`"))
-    return Config(port, dir, bkt, acct, key, p), p
+    resp = Azure.put("$(cont.baseurl)?restype=container", headers; account, status_exception=false, require_ssl_verification=false)
+    resp.status == 201 || throw(ArgumentError("unable to create azurite container `$(cont.name)`"))
+    return Config(account, cont, port, dir, p), p
 end
 
 function __init__()
@@ -214,5 +219,39 @@ function with(f)
 end
 
 end # module EC2
+
+module AzureVM
+
+using HTTP, URIs
+
+const RESP = """
+{
+  "access_token": "eyJ0eXAi...",
+  "refresh_token": "",
+  "expires_in": "3599",
+  "expires_on": "1506484173",
+  "not_before": "1506480273",
+  "resource": "https://storage.azure.com/",
+  "token_type": "Bearer"
+}"""
+
+# utility for mocking an AzureVM
+function with(f)
+    server = HTTP.serve!(50398) do req
+        if req.method == "GET" && req.target == "/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https%3A%2F%2Fstorage.azure.com%2F"
+            @assert HTTP.header(req, "Metadata") == "true"
+            return HTTP.Response(200, RESP)
+        else
+            return HTTP.Response(404)
+        end
+    end
+    try
+        f()
+    finally
+        close(server)
+    end
+end
+
+end # module AzureVM
 
 end # module CloudTest

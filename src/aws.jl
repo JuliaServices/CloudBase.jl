@@ -1,6 +1,6 @@
 const AWS_CONFIGS = Figgy.Store()
 
-mutable struct AWSAccount <: CloudAccount
+mutable struct AWSCredentials <: CloudAccount
     lock::ReentrantLock
     profile::String
     access_key_id::String
@@ -10,19 +10,19 @@ mutable struct AWSAccount <: CloudAccount
     expireThreshold::Dates.Period
 end
 
-AWSAccount(profile::String, access_key_id::String, secret_access_key::String, session_token::String, expiration, expireThreshold) =
-    AWSAccount(ReentrantLock(), profile, access_key_id, secret_access_key, session_token, expiration, expireThreshold)
+AWSCredentials(profile::String, access_key_id::String, secret_access_key::String, session_token::String, expiration, expireThreshold) =
+    AWSCredentials(ReentrantLock(), profile, access_key_id, secret_access_key, session_token, expiration, expireThreshold)
 
 # manual constructor
-AWSAccount(access_key_id::String, secret_access_key::String, session_token::String="", expiration=nothing; expireThreshold::Dates.Period=Dates.Minute(5)) =
-    AWSAccount("", access_key_id, secret_access_key, session_token, expiration, expireThreshold)
+AWSCredentials(access_key_id::String, secret_access_key::String, session_token::String="", expiration=nothing; expireThreshold::Dates.Period=Dates.Minute(5)) =
+    AWSCredentials("", access_key_id, secret_access_key, session_token, expiration, expireThreshold)
 
-expired(x::AWSAccount) = x.expiration !== nothing && Dates.now(Dates.UTC) > (x.expiration - x.expireThreshold)
+expired(x) = x.expiration !== nothing && Dates.now(Dates.UTC) > (x.expiration - x.expireThreshold)
 
-function credentials(x::AWSAccount)
+function credentials(x::AWSCredentials)
     Base.@lock x.lock begin
         if expired(x)
-            creds = loadAndGetCreds!(x.profile)
+            creds = loadAndGetAWSCreds!(x.profile)
             x.access_key_id = creds.access_key_id
             x.secret_access_key = creds.secret_access_key
             x.session_token = creds.session_token
@@ -32,7 +32,7 @@ function credentials(x::AWSAccount)
     end
 end
 
-function loadAndGetCreds!(profile::String="")
+function loadAndGetAWSCreds!(profile::String="")
     awsLoadConfig!(profile)
     exp = get(AWS_CONFIGS, "exp", nothing)
     expiration = exp === nothing ? exp : DateTime(rstrip(exp, 'Z'))
@@ -44,9 +44,9 @@ function loadAndGetCreds!(profile::String="")
     )
 end
 
-function AWSAccount(profile::String=""; expireThreshold=Dates.Minute(5))
-    creds = loadAndGetCreds!(profile)
-    return AWSAccount(profile, creds.access_key_id, creds.secret_access_key, creds.session_token, expiration, expireThreshold)
+function AWSCredentials(profile::String=""; expireThreshold=Dates.Minute(5))
+    creds = loadAndGetAWSCreds!(profile)
+    return AWSCredentials(profile, creds.access_key_id, creds.secret_access_key, creds.session_token, expiration, expireThreshold)
 end
 
 getCredentialsFile() = get(AWS_CONFIGS, "aws_shared_credentials_file", joinpath(homedir(), ".aws", "credentials"))
@@ -68,8 +68,8 @@ function awsLoadConfig!(profile::String="")
         awsConfigEnvironmentVariables(),
         Figgy.IniFile(credFile, profile),
         Figgy.IniFile(configFile, profile),
-        ECSCredentials(),
-        EC2Credentials(),
+        ECSCredentialsSource(),
+        EC2CredentialsSource(),
     )
     if haskey(AWS_CONFIGS, "role_arn")
         loadRoleArn(AWS_CONFIGS["role_arn"], credFile, configFile)
@@ -106,12 +106,12 @@ awsProgramArguments() = Figgy.kmap(Figgy.ProgramArguments(),
     "region" => "region"; select=true
 )
 
-struct ECSCredentials <: Figgy.FigSource
+struct ECSCredentialsSource <: Figgy.FigSource
     ecsHost::String # for testing purposes
 end
-ECSCredentials() = ECSCredentials("http://169.254.170.2")
+ECSCredentialsSource() = ECSCredentialsSource("http://169.254.170.2")
 
-function Figgy.load(x::ECSCredentials)
+function Figgy.load(x::ECSCredentialsSource)
     host = x.ecsHost
     # check if we have necessary config to fetch ECS creds
     Figgy.load!(AWS_CONFIGS, Figgy.kmap(Figgy.EnvironmentVariables(),
@@ -127,15 +127,15 @@ function Figgy.load(x::ECSCredentials)
         "RoleArn" => "role_arn",
     )
 end
-reloadECSCredentials!(ecsHost=nothing) = Figgy.load!(AWS_CONFIGS, ECSCredentials(ecsHost))
+reloadECSCredentials!(ecsHost=nothing) = Figgy.load!(AWS_CONFIGS, ECSCredentialsSource(ecsHost))
 
-struct EC2Credentials <: Figgy.FigSource
+struct EC2CredentialsSource <: Figgy.FigSource
     ec2Host::String # for testing purposes
     port::Int # for testing purposes
 end
-EC2Credentials() = EC2Credentials("169.254.169.254", 80)
+EC2CredentialsSource() = EC2CredentialsSource("169.254.169.254", 80)
 
-function Figgy.load(x::EC2Credentials)
+function Figgy.load(x::EC2CredentialsSource)
     host = x.ec2Host
     port = x.port
     # check if we have necessary config to fetch EC2 creds
@@ -150,7 +150,7 @@ function Figgy.load(x::EC2Credentials)
         "RoleArn" => "role_arn",
     )
 end
-reloadEC2Credentials!(ecsHost="169.254.169.254", port=80) = Figgy.load!(AWS_CONFIGS, EC2Credentials(ecsHost, port))
+reloadEC2Credentials!(ecsHost="169.254.169.254", port=80) = Figgy.load!(AWS_CONFIGS, EC2CredentialsSource(ecsHost, port))
 
 function loadRoleArn(roleArn, credFile, configFile)
     # with role_arn, we're going to call STS for temporary creds
@@ -261,7 +261,7 @@ function deduplicateHeaders!(headers)
     return
 end
 
-function awssign!(request::HTTP.Request; service=nothing, region=nothing, account::Union{Nothing, AWSAccount}=nothing, x_amz_date=nothing, includeContentSha256=true, debug=false, kw...)
+function awssign!(request::HTTP.Request; service=nothing, region=nothing, account::Union{Nothing, AWSCredentials}=nothing, x_amz_date=nothing, includeContentSha256=true, debug=false, kw...)
     if debug
         return LoggingExtras.withlevel(Logging.Debug; verbosity=1) do
             awssign!(request; service, region, access_key_id, secret_access_key, session_token, x_amz_date, includeContentSha256, kw...)
@@ -333,7 +333,7 @@ function awssign!(request::HTTP.Request; service=nothing, region=nothing, accoun
     return
 end
 
-function awssignv2!(request::HTTP.Request; account::Union{Nothing, AWSAccount}=nothing, version=nothing, timestamp=nothing, kw...)
+function awssignv2!(request::HTTP.Request; account::Union{Nothing, AWSCredentials}=nothing, version=nothing, timestamp=nothing, kw...)
     account === nothing && return
     if request.method == "GET"
         params = queryparams(request.url)

@@ -42,13 +42,13 @@ end
 module AWS
 
 using HTTP
-import ..cloudsignlayer, ..AWSAccount, ..AbstractStore, ..AWS_DEFAULT_REGION
+import ..cloudsignlayer, ..AWSCredentials, ..AbstractStore, ..AWS_DEFAULT_REGION
 
 awslayer(handler) = (req; kw...) -> handler(req; aws=true, kw...)
 
 HTTP.@client (first=(awslayer,), last=()) (first=(), last=(cloudsignlayer,))
 
-const Account = AWSAccount
+const Credentials = AWSCredentials
 
 struct Bucket <: AbstractStore
     name::String
@@ -66,11 +66,23 @@ end # module AWS
 module Azure
 
 using HTTP
-import ..cloudsignlayer
+import ..cloudsignlayer, ..AzureCredentials, ..AbstractStore
 
 azurelayer(handler) = (req; kw...) -> handler(req; azure=true, kw...)
 
 HTTP.@client (first=(azurelayer,), last=()) (first=(), last=(cloudsignlayer,))
+
+const Credentials = AzureCredentials
+
+struct Container <: AbstractStore
+    name::String
+    baseurl::String
+
+    function Container(name::String, account::String; host::Union{Nothing, String}=nothing)
+        baseurl = host === nothing ? "https://$account.blob.core.windows.net/$name/" : "$host/$account/$name/"
+        return new(name, baseurl)
+    end
+end
 
 end # module Azure
 
