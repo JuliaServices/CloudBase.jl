@@ -121,7 +121,7 @@ function with(f; dir=nothing, container=nothing, public=false, startupDelay=0.25
     return
 end
 
-function run(dir=nothing, container=nothing, public=false, startupDelay, debug=false)
+function run(dir=nothing, container=nothing, public=false, startupDelay=0.25, debug=false)
     isdefined(AZURITE_DIR, :x) || throw(ArgumentError("azurite scratch space not automatically populated; can't run azurite server"))
     if dir === nothing
         dir = mktempdir(AZURITE_DIR[])
