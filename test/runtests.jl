@@ -35,7 +35,7 @@ end
 
 @time @testset "AWS" begin
     config = Ref{Any}()
-    Minio.with() do conf
+    Minio.with(startupDelay=3) do conf
         config[] = conf
         account, bucket = conf
         csv = "a,b,c\n1,2,3\n4,5,$(rand())"
@@ -49,7 +49,7 @@ end
 
 @time @testset "Azure" begin
     config = Ref{Any}()
-    Azurite.with() do conf
+    Azurite.with(startupDelay=3) do conf
         config[] = conf
         account, container = conf
         csv = "a,b,c\n1,2,3\n4,5,$(rand())"
@@ -65,7 +65,7 @@ end
     mconfigs = Vector{Any}(undef, 10)
     aconfigs = Vector{Any}(undef, 10)
     @sync for i = 1:10
-        @async Minio.with() do conf
+        @async Minio.with(startupDelay=3) do conf
             mconfigs[i] = conf
             account, bucket = conf
             csv = "a,b,c\n1,2,3\n4,5,$(rand())"
@@ -73,7 +73,7 @@ end
             resp = AWS.get("$(bucket.baseurl)test.csv"; service="s3", account)
             @test String(resp.body) == csv
         end
-        @async Azurite.with() do conf
+        @async Azurite.with(startupDelay=3) do conf
             aconfigs[i] = conf
             account, container = conf
             csv = "a,b,c\n1,2,3\n4,5,$(rand())"

@@ -44,8 +44,8 @@ import ..Config, ..findOpenPorts, ...AWS
 # minio server directory, populated in __init__
 const MINIO_DIR = Ref{String}()
 
-function with(f; dir=nothing, bucket=nothing, public=false, debug=false)
-    config, proc = run(dir, bucket, public, debug)
+function with(f; dir=nothing, bucket=nothing, public=false, startupDelay=0.25, debug=false)
+    config, proc = run(dir, bucket, public, startupDelay, debug)
     try
         f(config)
     finally
@@ -64,7 +64,7 @@ function with(f; dir=nothing, bucket=nothing, public=false, debug=false)
     return
 end
 
-function run(dir=nothing, bucket=nothing, public=false, debug=false)
+function run(dir=nothing, bucket=nothing, public=false, startupDelay=0.25, debug=false)
     isdefined(MINIO_DIR, :x) || throw(ArgumentError("minio scratch space not automatically populated; can't run minio server"))
     if dir === nothing
         dir = mktempdir(MINIO_DIR[])
@@ -75,7 +75,7 @@ function run(dir=nothing, bucket=nothing, public=false, debug=false)
         port, cport = ports
         cmd = `$(minio_jll.minio()) server $dir --address :$(port) --console-address :$(cport)`
         p = debug ? Base.run(cmd, devnull, stderr, stderr; wait=false) : Base.run(cmd; wait=false)
-        sleep(0.25) # sleep just a little for server startup
+        sleep(startupDelay) # sleep just a little for server startup
         return p, port
     end
     account = AWS.Credentials("minioadmin", "minioadmin")
@@ -101,8 +101,8 @@ import ..Config, ..findOpenPorts, ...Azure
 # azurite server directory, populated in __init__
 const AZURITE_DIR = Ref{String}()
 
-function with(f; dir=nothing, container=nothing, public=false, debug=false)
-    config, proc = run(dir, container, public, debug)
+function with(f; dir=nothing, container=nothing, public=false, startupDelay=0.25, debug=false)
+    config, proc = run(dir, container, public, startupDelay, debug)
     try
         f(config)
     finally
@@ -121,7 +121,7 @@ function with(f; dir=nothing, container=nothing, public=false, debug=false)
     return
 end
 
-function run(dir=nothing, container=nothing, public=false, debug=false)
+function run(dir=nothing, container=nothing, public=false, startupDelay, debug=false)
     isdefined(AZURITE_DIR, :x) || throw(ArgumentError("azurite scratch space not automatically populated; can't run azurite server"))
     if dir === nothing
         dir = mktempdir(AZURITE_DIR[])
@@ -134,7 +134,7 @@ function run(dir=nothing, container=nothing, public=false, debug=false)
         key = joinpath(@__DIR__, "test.key")
         cmd = `$(node()) $(azurite) -l $dir -d $(joinpath(dir, "debug.log")) --blobPort $port --queuePort $qport --tablePort $tport --cert $cert --key $key --oauth basic`
         p = debug ? Base.run(cmd, devnull, stderr, stderr; wait=false) : Base.run(cmd; wait=false)
-        sleep(0.25) # sleep just a little for server startup
+        sleep(startupDelay) # sleep just a little for server startup
         return p, port
     end
     acct = "devstoreaccount1"
