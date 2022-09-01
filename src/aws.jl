@@ -19,10 +19,11 @@ AWSCredentials(access_key_id::String, secret_access_key::String, session_token::
 
 expired(x) = x.expiration !== nothing && Dates.now(Dates.UTC) > (x.expiration - x.expireThreshold)
 
-function credentials(x::AWSCredentials)
+function getCredentials(x::AWSCredentials)
     Base.@lock x.lock begin
         if expired(x)
-            creds = loadAndGetAWSCreds!(x.profile)
+            awsLoadConfig!(x.profile, x.expireThreshold)
+            creds = AWS_CONFIGS["credentials"]
             x.access_key_id = creds.access_key_id
             x.secret_access_key = creds.secret_access_key
             x.session_token = creds.session_token
@@ -32,27 +33,22 @@ function credentials(x::AWSCredentials)
     end
 end
 
-function loadAndGetAWSCreds!(profile::String="")
-    awsLoadConfig!(profile)
-    exp = get(AWS_CONFIGS, "exp", nothing)
-    expiration = exp === nothing ? exp : DateTime(rstrip(exp, 'Z'))
-    return (
-        access_key_id=get(AWS_CONFIGS, "aws_access_key_id", ""),
-        secret_access_key=get(AWS_CONFIGS, "aws_secret_access_key", ""),
-        session_token=get(AWS_CONFIGS, "aws_session_token", ""),
-        expiration,
-    )
-end
-
-function AWSCredentials(profile::String=""; expireThreshold=Dates.Minute(5))
-    creds = loadAndGetAWSCreds!(profile)
-    return AWSCredentials(profile, creds.access_key_id, creds.secret_access_key, creds.session_token, expiration, expireThreshold)
+function AWSCredentials(profile::String="", load::Bool=true; expireThreshold=Dates.Minute(5))
+    load && awsLoadConfig!(profile, expireThreshold)
+    return AWS_CONFIGS["credentials"]
 end
 
 getCredentialsFile() = get(AWS_CONFIGS, "aws_shared_credentials_file", joinpath(homedir(), ".aws", "credentials"))
 getConfigFile() = get(AWS_CONFIGS, "aws_config_file", joinpath(homedir(), ".aws", "config")) 
 
-function awsLoadConfig!(profile::String="")
+function awsLoadConfig!(profile::String="", expireThreshold=Dates.Minute(5))
+    # on each fresh load, we want to clear out potentially stale credential fields
+    # note that each load, we *will* replace AWS_CONFIGS["credentials"]
+    # so we still keep track of their history bundled together
+    delete!(AWS_CONFIGS, "aws_access_key_id")
+    delete!(AWS_CONFIGS, "aws_secret_access_key")
+    delete!(AWS_CONFIGS, "aws_session_token")
+    delete!(AWS_CONFIGS, "expiration")
     # first we load alternative config file locations & profile
     # in case we should use those instead of defaults
     Figgy.load!(AWS_CONFIGS, alternateConfigFileLocations(), awsProfileProgramArgument())
@@ -74,6 +70,18 @@ function awsLoadConfig!(profile::String="")
     if haskey(AWS_CONFIGS, "role_arn")
         loadRoleArn(AWS_CONFIGS["role_arn"], credFile, configFile)
     end
+    # after doing a single config "load", we want to bundle the credentials
+    # together as one object in AWS_CONFIGS, so we know they all came "together"
+    exp = get(AWS_CONFIGS, "expiration", nothing)
+    expiration = exp === nothing ? exp : DateTime(rstrip(exp, 'Z'))
+    Figgy.load!(AWS_CONFIGS, "credentials" => 
+        AWSCredentials(profile,
+            get(AWS_CONFIGS, "aws_access_key_id", ""),
+            get(AWS_CONFIGS, "aws_secret_access_key", ""),
+            get(AWS_CONFIGS, "aws_session_token", ""),
+            expiration, expireThreshold
+        )
+    )
     return
 end
 
@@ -167,13 +175,24 @@ function loadRoleArn(roleArn, credFile, configFile)
     if sprofile != ""
         # source_profile is the config file profile we should use for creds to call STS
         Figgy.load!(AWS_CONFIGS, Figgy.IniFile(credFile, sprofile), Figgy.IniFile(configFile, sprofile))
+        credentials = AWSCredentials(
+            get(AWS_CONFIGS, "aws_access_key_id", ""),
+            get(AWS_CONFIGS, "aws_secret_access_key", ""),
+            get(AWS_CONFIGS, "aws_session_token", "")
+        )
     elseif haskey(AWS_CONFIGS, "credential_source")
         # if credential_source is provided, we've already loaded source creds
         # above via environment variables, ecs, or ec2, so we should be ready to call STS
+        credentials = AWSCredentials(
+            get(AWS_CONFIGS, "aws_access_key_id", ""),
+            get(AWS_CONFIGS, "aws_secret_access_key", ""),
+            get(AWS_CONFIGS, "aws_session_token", "")
+        )
     elseif haskey(AWS_CONFIGS, "web_identity_token_file")
         # load the web identity token to be passed to STS
         params["WebIdentityToken"] = read(AWS_CONFIGS["web_identity_token_file"])
         params["Action"] = "AssumeRoleWithWebIdentity"
+        credentials = nothing
     end
     if haskey(AWS_CONFIGS, "duration_seconds")
         dur = parse(Int, AWS_CONFIGS["duration_seconds"])
@@ -185,7 +204,7 @@ function loadRoleArn(roleArn, credFile, configFile)
     end
     #TODO: support mfa_serial by prompting user for OTP: https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-role.html#cli-configure-role-mfa
     #TODO: support region-specific STS?
-    resp = AWS.post("https://sts.amazonaws.com/", [], params)
+    resp = AWS.post("https://sts.amazonaws.com/", [], params; credentials)
     # parse xml results, load into AWS_CONFIGS
     Figgy.load!(AWS_CONFIGS, Figgy.kmap(Figgy.XmlObject(resp.body, "AssumeRoleResult.Credentials"),
         "AccessKeyId" => "aws_access_key_id",
@@ -261,7 +280,7 @@ function deduplicateHeaders!(headers)
     return
 end
 
-function awssign!(request::HTTP.Request; service=nothing, region=nothing, account::Union{Nothing, AWSCredentials}=nothing, x_amz_date=nothing, includeContentSha256=true, debug=false, kw...)
+function awssign!(request::HTTP.Request; service=nothing, region=nothing, credentials::Union{Nothing, AWSCredentials}=nothing, x_amz_date=nothing, includeContentSha256=true, debug=false, kw...)
     if debug
         return LoggingExtras.withlevel(Logging.Debug; verbosity=1) do
             awssign!(request; service, region, access_key_id, secret_access_key, session_token, x_amz_date, includeContentSha256, kw...)
@@ -273,10 +292,10 @@ function awssign!(request::HTTP.Request; service=nothing, region=nothing, accoun
     service === nothing && ArgumentError("unable to determine AWS service for request; pass `service=X`")
     region = something(reg, region, get(AWS_CONFIGS, "region", AWS_DEFAULT_REGION))
     @debugv 1 "computed service = `$service`, region = `$region` for aws request"
-    # if the account is empty, let's assume this is for a public request, so no signing required
-    account === nothing && return
+    # if the credentials is empty, let's assume this is for a public request, so no signing required
+    credentials === nothing && return
     # determine credentials
-    creds = credentials(account)
+    creds = getCredentials(credentials)
     # we're going to set Authorization header, so delete it if present
     HTTP.removeheader(request, "Authorization")
     dt = x_amz_date === nothing ? Dates.now(Dates.UTC) : x_amz_date
@@ -333,8 +352,8 @@ function awssign!(request::HTTP.Request; service=nothing, region=nothing, accoun
     return
 end
 
-function awssignv2!(request::HTTP.Request; account::Union{Nothing, AWSCredentials}=nothing, version=nothing, timestamp=nothing, kw...)
-    account === nothing && return
+function awssignv2!(request::HTTP.Request; credentials::Union{Nothing, AWSCredentials}=nothing, version=nothing, timestamp=nothing, kw...)
+    credentials === nothing && return
     if request.method == "GET"
         params = queryparams(request.url)
     else
@@ -343,7 +362,7 @@ function awssignv2!(request::HTTP.Request; account::Union{Nothing, AWSCredential
         params = Dict(string(k) => v for (k, v) in pairs(request.body))
     end
     # determine credentials
-    creds = credentials(account)
+    creds = credentials(credentials)
     params["AWSAccessKeyId"] = creds.access_key_id
     params["SignatureVersion"] = "2"
     params["SignatureMethod"] = "HmacSHA256"

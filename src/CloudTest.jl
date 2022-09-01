@@ -1,6 +1,6 @@
 module CloudTest
 
-export Minio, Azurite, ECS, EC2, AzureVM
+export TempFile, Minio, Azurite, ECS, EC2, AzureVM
 
 import ..CloudAccount, ..AWS, ..Azure, ..AbstractStore
 
@@ -36,6 +36,24 @@ function findOpenPorts(f, n)
     end
 end
 
+# helper struct to treat tempfiles as IO objects
+struct TempFile <: IO
+    path
+    io
+end
+TempFile() = TempFile(mktemp()...)
+Base.close(x::TempFile) = close(x.io)
+Base.unsafe_write(x::TempFile, p::Ptr{UInt8}, n::UInt) = Base.unsafe_write(x.io, p, n)
+Base.write(x::TempFile, y::AbstractString) = write(x.io, y)
+Base.write(x::TempFile, y::Union{SubString{String}, String}) = write(x.io, y)
+Base.unsafe_read(x::TempFile, p::Ptr{UInt8}, n::UInt) = Base.unsafe_read(x.path, p, n)
+Base.readbytes!(s::TempFile, b::AbstractArray{UInt8}, nb=length(b)) = readbytes!(s.io, b, nb)
+Base.eof(x::TempFile) = eof(x.io)
+Base.bytesavailable(x::TempFile) = bytesavailable(x.io)
+Base.read(x::TempFile, ::Type{UInt8}) = read(x.io, UInt8)
+Base.seekstart(x::TempFile) = seekstart(x.io)
+Base.rm(x::TempFile) = rm(x.path)
+
 module Minio
 
 using minio_jll, Scratch
@@ -44,8 +62,8 @@ import ..Config, ..findOpenPorts, ...AWS
 # minio server directory, populated in __init__
 const MINIO_DIR = Ref{String}()
 
-function with(f; dir=nothing, bucket=nothing, public=false, startupDelay=0.25, debug=false)
-    config, proc = run(dir, bucket, public, startupDelay, debug)
+function with(f; kw...)
+    config, proc = run(; kw...)
     try
         f(config)
     finally
@@ -64,7 +82,7 @@ function with(f; dir=nothing, bucket=nothing, public=false, startupDelay=0.25, d
     return
 end
 
-function run(dir=nothing, bucket=nothing, public=false, startupDelay=0.25, debug=false)
+function run(; dir=nothing, bucket=nothing, public=false, startupDelay=0.25, debug=false)
     isdefined(MINIO_DIR, :x) || throw(ArgumentError("minio scratch space not automatically populated; can't run minio server"))
     if dir === nothing
         dir = mktempdir(MINIO_DIR[])
@@ -78,12 +96,12 @@ function run(dir=nothing, bucket=nothing, public=false, startupDelay=0.25, debug
         sleep(startupDelay) # sleep just a little for server startup
         return p, port
     end
-    account = AWS.Credentials("minioadmin", "minioadmin")
+    credentials = AWS.Credentials("minioadmin", "minioadmin")
     bkt = AWS.Bucket(something(bucket, "jl-minio-$(abs(rand(Int16)))"); host="http://127.0.0.1:$port")
     headers = public ? ["X-Amz-Acl" => "public-read-write"] : []
-    resp = AWS.put(bkt.baseurl, headers; service="s3", account, status_exception=false)
+    resp = AWS.put(bkt.baseurl, headers; service="s3", credentials, status_exception=false)
     resp.status == 200 || throw(ArgumentError("unable to create minio bucket `$bkt`"))
-    return Config(account, bkt, port, dir, p), p
+    return Config(credentials, bkt, port, dir, p), p
 end
 
 function __init__()
@@ -101,8 +119,8 @@ import ..Config, ..findOpenPorts, ...Azure
 # azurite server directory, populated in __init__
 const AZURITE_DIR = Ref{String}()
 
-function with(f; dir=nothing, container=nothing, public=false, startupDelay=0.25, debug=false)
-    config, proc = run(dir, container, public, startupDelay, debug)
+function with(f; kw...)
+    config, proc = run(; kw...)
     try
         f(config)
     finally
@@ -121,7 +139,7 @@ function with(f; dir=nothing, container=nothing, public=false, startupDelay=0.25
     return
 end
 
-function run(dir=nothing, container=nothing, public=false, startupDelay=0.25, debug=false)
+function run(; dir=nothing, container=nothing, public=false, startupDelay=0.25, debug=false)
     isdefined(AZURITE_DIR, :x) || throw(ArgumentError("azurite scratch space not automatically populated; can't run azurite server"))
     if dir === nothing
         dir = mktempdir(AZURITE_DIR[])
@@ -140,11 +158,11 @@ function run(dir=nothing, container=nothing, public=false, startupDelay=0.25, de
     acct = "devstoreaccount1"
     cont = Azure.Container(something(container, "jl-azurite-$(abs(rand(Int16)))"), acct; host="https://127.0.0.1:$port")
     key = "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw=="
-    account = Azure.Credentials(acct, key)
+    credentials = Azure.Credentials(acct, key)
     headers = public ? ["x-ms-blob-public-access" => "container"] : []
-    resp = Azure.put("$(cont.baseurl)?restype=container", headers; account, status_exception=false, require_ssl_verification=false)
+    resp = Azure.put("$(cont.baseurl)?restype=container", headers; credentials, status_exception=false, require_ssl_verification=false)
     resp.status == 201 || throw(ArgumentError("unable to create azurite container `$(cont.name)`"))
-    return Config(account, cont, port, dir, p), p
+    return Config(credentials, cont, port, dir, p), p
 end
 
 function __init__()
