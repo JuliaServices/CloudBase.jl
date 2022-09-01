@@ -3,7 +3,7 @@ module CloudBase
 export CloudTest
 
 using Dates, Base64, Sockets
-using HTTP, URIs, SHA, LoggingExtras, Figgy
+using HTTP, URIs, SHA, MD5, LoggingExtras, Figgy
 
 abstract type CloudAccount end
 abstract type AbstractStore end

@@ -7,7 +7,7 @@ const x32bit = Sys.WORD_SIZE == 32
     file = abspath(joinpath(dirname(pathof(CloudBase)), "../test/resources/awsSig4Cases.json"))
     cases = JSON3.read(read(file))
     configs = copy(cases.config)
-    configs[:account] = CloudBase.AWSCredentials(configs[:accessKeyId], configs[:secretAccessKey])
+    configs[:credentials] = CloudBase.AWSCredentials(configs[:accessKeyId], configs[:secretAccessKey])
     delete!(configs, :accessKeyId)
     delete!(configs, :secretAccessKey)
     debug = false
@@ -26,12 +26,12 @@ end
 
 @testset "AWSSigV2" begin
     req = HTTP.Request("GET", "/?Action=DescribeJobFlows"; url=HTTP.URI("https://elasticmapreduce.amazonaws.com?Action=DescribeJobFlows"))
-    account = CloudBase.AWSCredentials("AKIAIOSFODNN7EXAMPLE", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY")
-    CloudBase.awssignv2!(req; account, timestamp=DateTime(2011, 10, 3, 15, 19, 30), version="2009-03-31")
+    credentials = CloudBase.AWSCredentials("AKIAIOSFODNN7EXAMPLE", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY")
+    CloudBase.awssignv2!(req; credentials, timestamp=DateTime(2011, 10, 3, 15, 19, 30), version="2009-03-31")
     @test req.target ==
         "?AWSAccessKeyId=AKIAIOSFODNN7EXAMPLE&Action=DescribeJobFlows&SignatureMethod=HmacSHA256&SignatureVersion=2&Timestamp=2011-10-03T15%3A19%3A30&Version=2009-03-31&Signature=i91nKc4PWAt0JJIdXwz9HxZCJDdiy6cf%2FMj6vPxyYIs%3D"
     req = HTTP.Request("POST", "/", [], Dict("Action" => "DescribeJobFlows"); url=HTTP.URI("https://elasticmapreduce.amazonaws.com"))
-    CloudBase.awssignv2!(req; account, timestamp=DateTime(2011, 10, 3, 15, 19, 30), version="2009-03-31")
+    CloudBase.awssignv2!(req; credentials, timestamp=DateTime(2011, 10, 3, 15, 19, 30), version="2009-03-31")
     @test req.body["Signature"] == "wseguMzBRgA/4/fan8ZwEa0PIF+ws4WFbTJcG1ts5RY="
 end
 
@@ -39,10 +39,10 @@ end
     config = Ref{Any}()
     Minio.with(startupDelay=3) do conf
         config[] = conf
-        account, bucket = conf
+        credentials, bucket = conf
         csv = "a,b,c\n1,2,3\n4,5,$(rand())"
-        AWS.put("$(bucket.baseurl)test.csv", [], csv; service="s3", account)
-        resp = AWS.get("$(bucket.baseurl)test.csv"; service="s3", account)
+        AWS.put("$(bucket.baseurl)test.csv", [], csv; service="s3", credentials)
+        resp = AWS.get("$(bucket.baseurl)test.csv"; service="s3", credentials)
         @test String(resp.body) == csv
     end
     @test !isdir(config[].dir)
@@ -54,10 +54,10 @@ if !x32bit
     config = Ref{Any}()
     Azurite.with(startupDelay=3) do conf
         config[] = conf
-        account, container = conf
+        credentials, container = conf
         csv = "a,b,c\n1,2,3\n4,5,$(rand())"
-        Azure.put("$(container.baseurl)test", ["x-ms-blob-type" => "BlockBlob"], csv; account, require_ssl_verification=false)
-        resp = Azure.get("$(container.baseurl)test"; account, require_ssl_verification=false)
+        Azure.put("$(container.baseurl)test", ["x-ms-blob-type" => "BlockBlob"], csv; credentials, require_ssl_verification=false)
+        resp = Azure.get("$(container.baseurl)test"; credentials, require_ssl_verification=false)
         @test String(resp.body) == csv
     end
     @test !isdir(config[].dir)
@@ -71,19 +71,19 @@ end
     @sync for i = 1:10
         @async Minio.with(startupDelay=3) do conf
             mconfigs[i] = conf
-            account, bucket = conf
+            credentials, bucket = conf
             csv = "a,b,c\n1,2,3\n4,5,$(rand())"
-            AWS.put("$(bucket.baseurl)test.csv", [], csv; service="s3", account)
-            resp = AWS.get("$(bucket.baseurl)test.csv"; service="s3", account)
+            AWS.put("$(bucket.baseurl)test.csv", [], csv; service="s3", credentials)
+            resp = AWS.get("$(bucket.baseurl)test.csv"; service="s3", credentials)
             @test String(resp.body) == csv
         end
         if !x32bit
             @async Azurite.with(startupDelay=3) do conf
                 aconfigs[i] = conf
-                account, container = conf
+                credentials, container = conf
                 csv = "a,b,c\n1,2,3\n4,5,$(rand())"
-                Azure.put("$(container.baseurl)test", ["x-ms-blob-type" => "BlockBlob"], csv; account, require_ssl_verification=false)
-                resp = Azure.get("$(container.baseurl)test"; account, require_ssl_verification=false)
+                Azure.put("$(container.baseurl)test", ["x-ms-blob-type" => "BlockBlob"], csv; credentials, require_ssl_verification=false)
+                resp = Azure.get("$(container.baseurl)test"; credentials, require_ssl_verification=false)
                 @test String(resp.body) == csv
             end
         end

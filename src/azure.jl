@@ -28,10 +28,11 @@ AzureCredentials(auth::AzureAuth, expiration=nothing, expireThreshold=Dates.Minu
 AzureCredentials(account::String, key::String) = AzureCredentials(SharedKey(account, key))
 AzureCredentials(token::String) = AzureCredentials(AccessToken(token))
 
-function credentials(x::AzureCredentials)
+function getCredentials(x::AzureCredentials)
     Base.@lock x.lock begin
         if expired(x)
-            creds = loadAndGetAzureCreds!()
+            azureLoadConfig!()
+            creds = AZURE_CONFIGS["credentials"]
             x.auth = creds.auth
             x.expiration = creds.expiration
         end
@@ -39,25 +40,9 @@ function credentials(x::AzureCredentials)
     end
 end
 
-function loadAndGetAzureCreds!()
-    azureLoadConfig!()
-    exp = get(AZURE_CONFIGS, "expiration", "")
-    expiration = exp === nothing ? exp : Dates.unix2datetime(exp)
-    if haskey(AZURE_CONFIGS, "sas_token")
-        return (auth=AccessToken(AZURE_CONFIGS["sas_token"]), expiration)
-    elseif haskey(AZURE_CONFIGS, "account") && haskey(AZURE_CONFIGS, "key")
-        return (auth=SharedKey(AZURE_CONFIGS["account"], AZURE_CONFIGS["key"]), expiration=nothing)
-    else
-        return nothing
-    end
-end
-
-function AzureCredentials(; expireThreshold=Dates.Minute(5))
-    creds = loadAndGetAzureCreds!()
-    if creds === nothing
-        error("No Azure credentials found in environment")
-    end
-    return AzureCredentials(creds.auth, creds.expiration, expireThreshold)
+function AzureCredentials(load::Bool=true; expireThreshold=Dates.Minute(5))
+    load && azureLoadConfig!()
+    return AZURE_CONFIGS["credentials"]
 end
 
 azureConfigEnvironmentVariables() = Figgy.kmap(Figgy.EnvironmentVariables(),
@@ -78,6 +63,13 @@ azureVMConfig() = Figgy.kmap(Figgy.EnvironmentVariables(),
 )
 
 function azureLoadConfig!()
+    # on each fresh load, we want to clear out potentially stale credential fields
+    # note that each load, we *will* replace AZURE_CONFIGS["credentials"]
+    # so we still keep track of their history bundled together
+    delete!(AZURE_CONFIGS, "sas_token")
+    delete!(AZURE_CONFIGS, "account")
+    delete!(AZURE_CONFIGS, "key")
+    delete!(AZURE_CONFIGS, "expiration")
     Figgy.load!(AZURE_CONFIGS, azureVMConfig())
     configFile = joinpath(homedir(), ".azure", "config")
     Figgy.load!(AZURE_CONFIGS,
@@ -88,6 +80,19 @@ function azureLoadConfig!()
         #TODO: support oauth w/ client id/client secret
         # https://docs.microsoft.com/en-us/azure/active-directory/develop/scenario-daemon-acquire-token?tabs=dotnet
     )
+    # after doing a single config "load", we want to bundle the credentials
+    # together as one object in AZURE_CONFIGS, so we know they all came "together"
+    exp = get(AZURE_CONFIGS, "expiration", "")
+    expiration = exp === nothing ? exp : Dates.unix2datetime(exp)
+    if haskey(AZURE_CONFIGS, "sas_token")
+        auth = AccessToken(AZURE_CONFIGS["sas_token"])
+    elseif haskey(AZURE_CONFIGS, "account") && haskey(AZURE_CONFIGS, "key")
+        auth = SharedKey(AZURE_CONFIGS["account"], AZURE_CONFIGS["key"])
+    else
+        auth = SharedKey("", "")
+    end
+    Figgy.load!(AZURE_CONFIGS, "credentials" => AzureCredentials(auth, expiration, expireThreshold))
+    return
 end
 
 struct AzureVMCredentialsSource <: Figgy.FigSource
@@ -134,17 +139,22 @@ function combineParams(params::Dict{String, Vector{String}})
     return String(take!(io))
 end
 
-function azuresign!(request::HTTP.Request; account=nothing, key=nothing, kw...)
-    # if account not provided, assume public access
-    account === nothing && return nothing
+function azuresign!(request::HTTP.Request; credentials=nothing, addMd5::Bool=true, kw...)
+    # if credentials not provided, assume public access
+    credentials === nothing && return
     # we're going to set Authorization header, so delete it if present
     HTTP.removeheader(request, "Authorization")
     dt = Dates.now(Dates.UTC)
     requestDateTime = Dates.format(dt, RFC1123Format)
     HTTP.setheader(request, "x-ms-date" => requestDateTime)
     HTTP.setheader(request, "x-ms-version" => AZURE_API_VERSION)
+    # if addMd5 && request.body isa Union{Vector{UInt8}, String}
+    #     hash = bytes2hex(md5(request.body))
+    #     @show hash
+    #     HTTP.setheader(request, "Content-MD5" => bytes2hex(md5(request.body)))
+    # end
     # determine credentials
-    creds = credentials(account)
+    creds = getCredentials(credentials)
     if creds isa AccessToken
         HTTP.setheader(request, "Authorization" => "Bearer $(creds.token)")
         return
