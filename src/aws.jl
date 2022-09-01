@@ -362,7 +362,7 @@ function awssignv2!(request::HTTP.Request; credentials::Union{Nothing, AWSCreden
         params = Dict(string(k) => v for (k, v) in pairs(request.body))
     end
     # determine credentials
-    creds = credentials(credentials)
+    creds = getCredentials(credentials)
     params["AWSAccessKeyId"] = creds.access_key_id
     params["SignatureVersion"] = "2"
     params["SignatureMethod"] = "HmacSHA256"
