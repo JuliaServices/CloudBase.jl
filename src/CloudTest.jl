@@ -76,6 +76,18 @@ const MINIO_DIR = Ref{String}()
 Starts a minio server on a random open port, and passes a
 [`CloudTest.Config`](@ref) to `f`, which contains the credentials
 that should be used for requests made, as well as an `AWS.Bucket`
+that is created to help bootstrap the testing process. Supported
+keyword arguments include:
+  * `dir`: directory to use for the minio server, defaults to a
+    temporary directory created by `Scratch` (which is deleted
+    when the server is stopped)
+  * `bucket`: name of the bucket to create, defaults to "test"
+  * `public`: whether the bucket should be public, defaults to `false`
+  * `startupDelay`: number of seconds to wait after starting the
+    server before creating the bucket, defaults to `0.25`; this
+    can be useful on slower systems to allow time for the server
+    to fully startup
+  * `debug`: whether to turn on minio debug logging, defaults to `false`
 """
 function with(f; kw...)
     config, proc = run(; kw...)
@@ -97,6 +109,9 @@ function with(f; kw...)
     return
 end
 
+# use `with`, not `run`! if you `run`, it returns `conf, p`, where `p` is the server process
+# note that existing the Julia process *will not* stop the server process, which can easily
+# lead to "dangling" server processes. You can `kill(p)` to stop the server process manually
 function run(; dir=nothing, bucket=nothing, public=false, startupDelay=0.25, debug=false)
     isdefined(MINIO_DIR, :x) || throw(ArgumentError("minio scratch space not automatically populated; can't run minio server"))
     if dir === nothing
@@ -134,6 +149,25 @@ import ..Config, ..findOpenPorts, ...Azure
 # azurite server directory, populated in __init__
 const AZURITE_DIR = Ref{String}()
 
+"""
+    Azurite.with(f; dir, bucket, public, startupDelay, debug)
+
+Starts an azurite server on a random open port, and passes a
+[`CloudTest.Config`](@ref) to `f`, which contains the credentials
+that should be used for requests made, as well as an `Azure.Container`
+that is created to help bootstrap the testing process. Supported
+keyword arguments include:
+  * `dir`: directory to use for the minio server, defaults to a
+    temporary directory created by `Scratch` (which is deleted
+    when the server is stopped)
+  * `bucket`: name of the bucket to create, defaults to "test"
+  * `public`: whether the bucket should be public, defaults to `false`
+  * `startupDelay`: number of seconds to wait after starting the
+    server before creating the bucket, defaults to `0.25`; this
+    can be useful on slower systems to allow time for the server
+    to fully startup
+  * `debug`: whether to turn on minio debug logging, defaults to `false`
+"""
 function with(f; kw...)
     config, proc = run(; kw...)
     try
@@ -154,6 +188,9 @@ function with(f; kw...)
     return
 end
 
+# use `with`, not `run`! if you `run`, it returns `conf, p`, where `p` is the server process
+# note that existing the Julia process *will not* stop the server process, which can easily
+# lead to "dangling" server processes. You can `kill(p)` to stop the server process manually
 function run(; dir=nothing, container=nothing, public=false, startupDelay=0.25, debug=false)
     isdefined(AZURITE_DIR, :x) || throw(ArgumentError("azurite scratch space not automatically populated; can't run azurite server"))
     if dir === nothing
@@ -187,6 +224,7 @@ end
 
 end # module Azurite
 
+# few helper modules to simulate different credential flows for AWS/Azure
 module ECS
 
 using HTTP
