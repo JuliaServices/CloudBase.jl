@@ -15,7 +15,7 @@ end
 
 Base.show(io::IO, ::AccessToken) = print(io, "AccessToken(****)")
 
-mutable struct AzureCredentials <: CloudAccount
+mutable struct AzureCredentials <: CloudCredentials
     lock::ReentrantLock
     auth::AzureAuth
     expiration::Union{Nothing, DateTime}
@@ -25,8 +25,8 @@ end
 AzureCredentials(auth::AzureAuth, expiration=nothing, expireThreshold=Dates.Minute(5)) =
     AzureCredentials(ReentrantLock(), auth, expiration, expireThreshold)
 
-AzureCredentials(account::String, key::String) = AzureCredentials(SharedKey(account, key))
-AzureCredentials(token::String) = AzureCredentials(AccessToken(token))
+AzureCredentials(account::String, key::String; kw...) = AzureCredentials(SharedKey(account, key); kw...)
+AzureCredentials(token::String; kw...) = AzureCredentials(AccessToken(token); kw...)
 
 function getCredentials(x::AzureCredentials)
     Base.@lock x.lock begin
@@ -121,20 +121,22 @@ const AZURE_API_VERSION = "2020-04-08"
 const RFC1123Format = dateformat"e, dd u yyyy HH:MM:SS \G\M\T"
 trimall2(x) = strip(replace(x, r"[\s]{2,}" => " "))
 
-function pairsToDict(pairs)
-    d = Dict{String, Vector{String}}()
+function combineParams(pairs)
+    io = IOBuffer()
+    cur_key = ""
+    vals = String[]
     for (k, v) in pairs
-        vals = get!(() -> String[], d, k)
+        if k != cur_key
+            if !isempty(vals)
+                print(io, "\n$cur_key:$(join(sort!(vals), ","))")
+            end
+            cur_key = k
+            empty!(vals)
+        end
         push!(vals, v)
     end
-    return d
-end
-
-function combineParams(params::Dict{String, Vector{String}})
-    io = IOBuffer()
-    for (k, v) in params
-        sort!(v)
-        print(io, "\n$k:$(join(v, ","))")
+    if !isempty(vals)
+        print(io, "\n$cur_key:$(join(sort!(vals), ","))")
     end
     return String(take!(io))
 end
@@ -166,8 +168,8 @@ function azuresign!(request::HTTP.Request; credentials=nothing, addMd5::Bool=tru
     msheaders = filter(x -> startswith(lowercase(x.first), "x-ms-"), request.headers)
     headers = sort!(map(x -> lowercase(x.first) => trimall2(x.second), msheaders), by=x->x.first)
     canonicalHeaders = join(map(x -> "$(x.first):$(x.second)", headers), "\n")
-    pairs = sort!(map(x -> lowercase(x.first) => x.second, collect(queryparampairs(request.url))), by=x->x.first)
-    canonicalQueryString = combineParams(pairsToDict(pairs))
+    pairs = sort!(map(x -> lowercase(x.first) => x.second, queryparampairs(request.url)), by=x->x.first)
+    canonicalQueryString = combineParams(pairs)
     canonicalResource = "/$(creds.account)$(request.url.path)$canonicalQueryString"
     len = HTTP.header(request, "Content-Length")
     stringToSign = """$(request.method)

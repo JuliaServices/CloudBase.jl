@@ -2,17 +2,25 @@ module CloudTest
 
 export TempFile, Minio, Azurite, ECS, EC2, AzureVM
 
-import ..CloudAccount, ..AWS, ..Azure, ..AbstractStore
+import ..CloudCredentials, ..AWS, ..Azure, ..AbstractStore
 
+"""
+    CloudTest.Config
+
+Convenience struct passed to the user-provided functions for `Minio.with`
+and `Azurite.with` that holds credentials and the store object automatically
+created when the services were started. Can be iterated to get the credentials
+and store, like `credentials, bucket = conf`.
+"""
 struct Config
-    account::CloudAccount
+    credentials::CloudCredentials
     store::AbstractStore
     port::Int
     dir::String
     process
 end
 
-Base.iterate(x::Config, i=1) = i == 1 ? (x.account, 2) : i == 2 ? (x.store, 3) : nothing
+Base.iterate(x::Config, i=1) = i == 1 ? (x.credentials, 2) : i == 2 ? (x.store, 3) : nothing
 
 using Sockets, Random
 
@@ -62,6 +70,13 @@ import ..Config, ..findOpenPorts, ...AWS
 # minio server directory, populated in __init__
 const MINIO_DIR = Ref{String}()
 
+"""
+    Minio.with(f; dir, bucket, public, startupDelay, debug)
+
+Starts a minio server on a random open port, and passes a
+[`CloudTest.Config`](@ref) to `f`, which contains the credentials
+that should be used for requests made, as well as an `AWS.Bucket`
+"""
 function with(f; kw...)
     config, proc = run(; kw...)
     try

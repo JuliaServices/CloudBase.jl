@@ -1,6 +1,6 @@
 const AWS_CONFIGS = Figgy.Store()
 
-mutable struct AWSCredentials <: CloudAccount
+mutable struct AWSCredentials <: CloudCredentials
     lock::ReentrantLock
     profile::String
     access_key_id::String
@@ -17,13 +17,14 @@ AWSCredentials(profile::String, access_key_id::String, secret_access_key::String
 AWSCredentials(access_key_id::String, secret_access_key::String, session_token::String="", expiration=nothing; expireThreshold::Dates.Period=Dates.Minute(5)) =
     AWSCredentials("", access_key_id, secret_access_key, session_token, expiration, expireThreshold)
 
-expired(x) = x.expiration !== nothing && Dates.now(Dates.UTC) > (x.expiration - x.expireThreshold)
-
+# accessor method that locks, checks expiration, and refreshes if necessary, before returning
+# individual credential pieces as NamedTuple; used in awssign!
 function getCredentials(x::AWSCredentials)
     Base.@lock x.lock begin
         if expired(x)
             awsLoadConfig!(x.profile, x.expireThreshold)
             creds = AWS_CONFIGS["credentials"]
+            # we refreshed the credentials, now we update the fields of the original creds
             x.access_key_id = creds.access_key_id
             x.secret_access_key = creds.secret_access_key
             x.session_token = creds.session_token
@@ -68,6 +69,7 @@ function awsLoadConfig!(profile::String="", expireThreshold=Dates.Minute(5))
         EC2CredentialsSource(),
     )
     if haskey(AWS_CONFIGS, "role_arn")
+        # if we have a role_arn, we need to call STS to get temporary credentials
         loadRoleArn(AWS_CONFIGS["role_arn"], credFile, configFile)
     end
     # after doing a single config "load", we want to bundle the credentials
@@ -114,6 +116,7 @@ awsProgramArguments() = Figgy.kmap(Figgy.ProgramArguments(),
     "region" => "region"; select=true
 )
 
+# from within an ECS container, there's a specific endpoint setup to retrieve credentials
 struct ECSCredentialsSource <: Figgy.FigSource
     ecsHost::String # for testing purposes
 end
@@ -137,6 +140,8 @@ function Figgy.load(x::ECSCredentialsSource)
 end
 reloadECSCredentials!(ecsHost=nothing) = Figgy.load!(AWS_CONFIGS, ECSCredentialsSource(ecsHost))
 
+# similar to ECS, EC2 instances can be configured to have credentials provided automatically
+# note that in awsLoadConfig, ECS takes precedence over EC2 as AWS dictates the precedence
 struct EC2CredentialsSource <: Figgy.FigSource
     ec2Host::String # for testing purposes
     port::Int # for testing purposes
@@ -213,10 +218,6 @@ function loadRoleArn(roleArn, credFile, configFile)
         "Expiration" => "expiration",
     ))
 end
-
-#TODO: respect ca_bundle
-#TODO: respect max_attempts
-#TODO: respect credential_source
 
 const AWS_DEFAULT_REGION = "us-east-1"
 
@@ -319,7 +320,7 @@ function awssign!(request::HTTP.Request; service=nothing, region=nothing, creden
     signedHeaders = join(map(first, headers), ";")
     @assert HTTP.isbytes(request.body) || request.body isa Union{Dict, NamedTuple}
     body = HTTP.isbytes(request.body) ? request.body : HTTP.escapeuri(request.body)
-    #TODO: handle streaming request bodies
+    #TODO: handle streaming request bodies?
     payloadHash = bytes2hex(sha256(body))
     if includeContentSha256
         HTTP.setheader(request, "x-amz-content-sha256" => payloadHash)
