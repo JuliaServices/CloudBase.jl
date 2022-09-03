@@ -53,8 +53,11 @@ include("azure.jl")
 function cloudsignlayer(handler)
     function cloudsign(stream; aws::Bool=false, awsv2::Bool=false, azure::Bool=false, kw...)
         req = stream.message.request
-        awsv2 && awssignv2!(req; kw...)
-        aws && awssign!(req; kw...)
+        if awsv2
+            awssignv2!(req; kw...)
+        elseif aws
+            awssign!(req; kw...)
+        end
         azure && azuresign!(req; kw...)
         return handler(stream; kw...)
     end
@@ -73,7 +76,7 @@ module AWS
 using HTTP
 import ..cloudsignlayer, ..AWSCredentials, ..AbstractStore, ..AWS_DEFAULT_REGION
 
-awslayer(handler) = (req; kw...) -> handler(req; aws=true, kw...)
+awslayer(handler) = (req; kw...) -> handler(req; kw..., aws=true)
 
 HTTP.@client (first=(awslayer,), last=()) (first=(), last=(cloudsignlayer,))
 
@@ -118,17 +121,19 @@ retrieved. Temporary credentials via EC2, EC2, or role_arn that include expirati
 const Credentials = AWSCredentials
 
 """
-    CloudBase.AWS.Bucket(name, [region="us-east-1"])
+    CloudBase.AWS.Bucket(name, [region="us-east-1"]; accelerate::Bool=false)
 
 Object representation of an AWS storage bucket with the given `name`. If not provided,
 the `region` is assumed to be "us-east-1". Aliased in the CloudStore.jl package as `S3.Bucket`.
+If `accelerate=true` is passed, requests with the bucket will use the `bucket.s3-accelerate.amazonaws.com`
+style url instead of the traditional `bucket.s3.amazonaws.com`.
 """
 struct Bucket <: AbstractStore
     name::String
     baseurl::String
 
-    function Bucket(name::String, region::String=AWS_DEFAULT_REGION; host::Union{Nothing, String}=nothing)
-        baseurl = host === nothing ? "https://$name.s3.$region.amazonaws.com/" : "$host/$name/"
+    function Bucket(name::String, region::String=AWS_DEFAULT_REGION; accelerate::Bool=false, host::Union{Nothing, String}=nothing)
+        baseurl = host === nothing ? "https://$name.s3$(accelerate ? "-accelerate" : "").$region.amazonaws.com/" : "$host/$name/"
         return new(name, baseurl)
     end
 end
