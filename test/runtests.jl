@@ -59,6 +59,20 @@ if !x32bit
         Azure.put("$(container.baseurl)test", ["x-ms-blob-type" => "BlockBlob"], csv; credentials)
         resp = Azure.get("$(container.baseurl)test"; credentials)
         @test String(resp.body) == csv
+        # test SAS generation
+        # account-level
+        url = "$(container.baseurl)test2"
+        key = credentials.auth.key
+        sas = CloudBase.generateAccountSASURI(url, key; signedPermission=CloudBase.SignedPermission("rw"))
+        resp = HTTP.put(sas, ["x-ms-blob-type" => "BlockBlob"], csv; require_ssl_verification=false)
+        resp = HTTP.get(sas; require_ssl_verification=false)
+        @test String(resp.body) == csv
+        # service-level
+        url = "$(container.baseurl)test3"
+        sas = CloudBase.generateServiceSASURI(url, key; signedPermission=CloudBase.SignedPermission("rw"))
+        resp = HTTP.put(sas, ["x-ms-blob-type" => "BlockBlob"], csv; require_ssl_verification=false)
+        resp = HTTP.get(sas; require_ssl_verification=false)
+        @test String(resp.body) == csv
     end
     @test !isdir(config[].dir)
     @test success(config[].process)
