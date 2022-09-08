@@ -170,7 +170,8 @@ function azuresign!(request::HTTP.Request; credentials=nothing, addMd5::Bool=tru
     canonicalHeaders = join(map(x -> "$(x.first):$(x.second)", headers), "\n")
     pairs = sort!(map(x -> lowercase(x.first) => x.second, queryparampairs(request.url)), by=x->x.first)
     canonicalQueryString = combineParams(pairs)
-    canonicalResource = "/$(creds.account)$(request.url.path)$canonicalQueryString"
+    path = isempty(request.url.path) ? "/" : request.url.path
+    canonicalResource = "/$(creds.account)$(path)$canonicalQueryString"
     len = HTTP.header(request, "Content-Length")
     stringToSign = """$(request.method)
     $(HTTP.header(request, "Content-Encoding"))
@@ -196,3 +197,5 @@ function azuresign!(request::HTTP.Request; credentials=nothing, addMd5::Bool=tru
     HTTP.setheader(request, "Authorization" => header)
     return
 end
+
+include("azure_sas.jl")
