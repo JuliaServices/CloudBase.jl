@@ -153,7 +153,7 @@ module Azure
 using HTTP
 import ..cloudsignlayer, ..AzureCredentials, ..AbstractStore
 
-azurelayer(handler) = (req; kw...) -> handler(req; azure=true, aws=false, awsv2=false, kw...)
+azurelayer(handler) = (req; kw...) -> handler(req; azure=true, aws=false, awsv2=false, require_ssl_verification=req.url.host != "127.0.0.1", kw...)
 
 HTTP.@client (first=(azurelayer,), last=()) (first=(), last=(cloudsignlayer,))
 

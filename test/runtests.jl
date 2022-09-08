@@ -56,8 +56,8 @@ if !x32bit
         config[] = conf
         credentials, container = conf
         csv = "a,b,c\n1,2,3\n4,5,$(rand())"
-        Azure.put("$(container.baseurl)test", ["x-ms-blob-type" => "BlockBlob"], csv; credentials, require_ssl_verification=false)
-        resp = Azure.get("$(container.baseurl)test"; credentials, require_ssl_verification=false)
+        Azure.put("$(container.baseurl)test", ["x-ms-blob-type" => "BlockBlob"], csv; credentials)
+        resp = Azure.get("$(container.baseurl)test"; credentials)
         @test String(resp.body) == csv
     end
     @test !isdir(config[].dir)
@@ -82,8 +82,8 @@ end
                 aconfigs[i] = conf
                 credentials, container = conf
                 csv = "a,b,c\n1,2,3\n4,5,$(rand())"
-                Azure.put("$(container.baseurl)test", ["x-ms-blob-type" => "BlockBlob"], csv; credentials, require_ssl_verification=false)
-                resp = Azure.get("$(container.baseurl)test"; credentials, require_ssl_verification=false)
+                Azure.put("$(container.baseurl)test", ["x-ms-blob-type" => "BlockBlob"], csv; credentials)
+                resp = Azure.get("$(container.baseurl)test"; credentials)
                 @test String(resp.body) == csv
             end
         end
