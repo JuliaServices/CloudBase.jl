@@ -4,6 +4,35 @@ export TempFile, Minio, Azurite, ECS, EC2, AzureVM
 
 import ..CloudCredentials, ..AWS, ..Azure, ..AbstractStore
 
+const INTERPRETER = Ref{String}()
+
+function __init__()
+    if success(`which patchelf`)
+        INTERPRETER[] = strip(read(`patchelf --print-interpreter $(unsafe_string(Base.JLOptions().julia_bin))`, String))
+    end
+    return
+end
+
+"""
+    _cmd(`cmd`)
+
+This utility function ensures that we can run binaries in commands on Linux in Nix.
+Use it as a wrapper around an existing `cmd`.
+## Example:
+```julia
+julia> run(_cmd(`ls`))
+```
+"""
+function _cmd(tool)
+    # When on NixOS, or inside nix build where /lib64/ld-linux-x86-64.so.2 is not available,
+    # use the ELF interpreter from the julia binary
+    if Sys.islinux() && !ispath("/lib64/ld-linux-x86-64.so.2") && isdefined(INTERPRETER, :x)
+        pushfirst!(tool.exec, INTERPRETER[])
+    end
+    return tool
+end
+
+
 """
     CloudTest.Config
 
@@ -65,7 +94,7 @@ Base.rm(x::TempFile) = rm(x.path)
 module Minio
 
 using minio_jll, Scratch
-import ..Config, ..findOpenPorts, ...AWS
+import ..Config, ..findOpenPorts, ...AWS, .._cmd
 
 # minio server directory, populated in __init__
 const MINIO_DIR = Ref{String}()
@@ -121,7 +150,7 @@ function run(; dir=nothing, bucket=nothing, public=false, startupDelay=0.25, deb
     end
     p, port = findOpenPorts(2) do ports
         port, cport = ports
-        cmd = `$(minio_jll.minio()) server $dir --address :$(port) --console-address :$(cport)`
+        cmd = _cmd(`$(minio_jll.minio()) server $dir --address :$(port) --console-address :$(cport)`)
         p = debug ? Base.run(cmd, devnull, stderr, stderr; wait=false) : Base.run(cmd; wait=false)
         sleep(startupDelay) # sleep just a little for server startup
         return p, port
@@ -130,7 +159,10 @@ function run(; dir=nothing, bucket=nothing, public=false, startupDelay=0.25, deb
     bkt = AWS.Bucket(something(bucket, "jl-minio-$(abs(rand(Int16)))"); host="http://127.0.0.1:$port")
     headers = public ? ["X-Amz-Acl" => "public-read-write"] : []
     resp = AWS.put(bkt.baseurl, headers; service="s3", credentials, status_exception=false)
-    resp.status == 200 || throw(ArgumentError("unable to create minio bucket `$bkt`"))
+    if resp.status != 200
+        @error resp
+        throw(ArgumentError("unable to create minio bucket `$bkt`"))
+    end
     return Config(credentials, bkt, port, dir, p), p
 end
 
@@ -144,7 +176,7 @@ end # module Minio
 module Azurite
 
 using NodeJS_16_jll, azurite_jll, Scratch
-import ..Config, ..findOpenPorts, ...Azure
+import ..Config, ..findOpenPorts, ...Azure, .._cmd
 
 # azurite server directory, populated in __init__
 const AZURITE_DIR = Ref{String}()
@@ -202,7 +234,7 @@ function run(; dir=nothing, container=nothing, public=false, startupDelay=0.25, 
         port, qport, tport = ports
         cert = joinpath(@__DIR__, "test.cert")
         key = joinpath(@__DIR__, "test.key")
-        cmd = `$(node()) $(azurite) -l $dir -d $(joinpath(dir, "debug.log")) --blobPort $port --queuePort $qport --tablePort $tport --cert $cert --key $key --oauth basic`
+        cmd = _cmd(`$(node()) $(azurite) -l $dir -d $(joinpath(dir, "debug.log")) --blobPort $port --queuePort $qport --tablePort $tport --cert $cert --key $key --oauth basic`)
         p = debug ? Base.run(cmd, devnull, stderr, stderr; wait=false) : Base.run(cmd; wait=false)
         sleep(startupDelay) # sleep just a little for server startup
         return p, port
@@ -213,7 +245,10 @@ function run(; dir=nothing, container=nothing, public=false, startupDelay=0.25, 
     credentials = Azure.Credentials(acct, key)
     headers = public ? ["x-ms-blob-public-access" => "container"] : []
     resp = Azure.put("$(cont.baseurl)?restype=container", headers; credentials, status_exception=false, require_ssl_verification=false)
-    resp.status == 201 || throw(ArgumentError("unable to create azurite container `$(cont.name)`"))
+    if resp.status != 201
+        @error resp
+        throw(ArgumentError("unable to create azurite container `$(cont.name)`"))
+    end
     return Config(credentials, cont, port, dir, p), p
 end
 
