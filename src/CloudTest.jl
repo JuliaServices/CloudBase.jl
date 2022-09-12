@@ -159,9 +159,15 @@ function run(; dir=nothing, bucket=nothing, public=false, startupDelay=0.25, deb
     bkt = AWS.Bucket(something(bucket, "jl-minio-$(abs(rand(Int16)))"); host="http://127.0.0.1:$port")
     headers = public ? ["X-Amz-Acl" => "public-read-write"] : []
     resp = AWS.put(bkt.baseurl, headers; service="s3", credentials, status_exception=false)
-    if resp.status != 200
-        @error resp
-        throw(ArgumentError("unable to create minio bucket `$bkt`"))
+    while resp.status != 200
+        if resp.status == 503
+            # minio server is still starting up, so wait a bit and try again
+            sleep(startupDelay)
+            resp = AWS.put(bkt.baseurl, headers; service="s3", credentials, status_exception=false)
+        else
+            @error resp
+            throw(ArgumentError("unable to create minio bucket `$bkt`"))
+        end
     end
     return Config(credentials, bkt, port, dir, p), p
 end
