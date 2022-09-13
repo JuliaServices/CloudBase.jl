@@ -47,6 +47,14 @@ end
     end
     @test !isdir(config[].dir)
     @test success(config[].process)
+    # test public access
+    Minio.with(startupDelay=3, public=true) do conf
+        credentials, bucket = conf
+        csv = "a,b,c\n1,2,3\n4,5,$(rand())"
+        AWS.put("$(bucket.baseurl)test.csv", [], csv; service="s3")
+        resp = AWS.get("$(bucket.baseurl)test.csv"; service="s3")
+        @test String(resp.body) == csv
+    end
 end
 
 if !x32bit
@@ -76,6 +84,14 @@ if !x32bit
     end
     @test !isdir(config[].dir)
     @test success(config[].process)
+    # test public access
+    Azurite.with(startupDelay=3, public=true) do conf
+        credentials, container = conf
+        csv = "a,b,c\n1,2,3\n4,5,$(rand())"
+        Azure.put("$(container.baseurl)test", ["x-ms-blob-type" => "BlockBlob"], csv)
+        resp = Azure.get("$(container.baseurl)test")
+        @test String(resp.body) == csv
+    end
 end
 end
 

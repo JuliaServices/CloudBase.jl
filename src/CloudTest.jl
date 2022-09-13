@@ -138,6 +138,28 @@ function with(f; kw...)
     return
 end
 
+publicPolicy(bucket) = """
+{
+"Version":"2012-10-17",
+"Statement" : [
+    {
+        "Effect":"Allow",
+        "Sid":"1",
+        "Principal": "*",
+        "Action": ["s3:GetBucketLocation", "s3:ListBucket", "s3:PutBucketVersioning"],
+        "Resource":"arn:aws:s3:::$bucket"
+    },
+    {
+        "Effect":"Allow",
+        "Sid":"1",
+        "Principal": "*",
+        "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:GetObjectVersion", "s3:DeleteObjectVersion"],
+        "Resource":"arn:aws:s3:::$bucket/*"
+    }
+ ] 
+}
+"""
+
 # use `with`, not `run`! if you `run`, it returns `conf, p`, where `p` is the server process
 # note that existing the Julia process *will not* stop the server process, which can easily
 # lead to "dangling" server processes. You can `kill(p)` to stop the server process manually
@@ -157,8 +179,7 @@ function run(; dir=nothing, bucket=nothing, public=false, startupDelay=0.25, deb
     end
     credentials = AWS.Credentials("minioadmin", "minioadmin")
     bkt = AWS.Bucket(something(bucket, "jl-minio-$(abs(rand(Int16)))"); host="http://127.0.0.1:$port")
-    headers = public ? ["X-Amz-Acl" => "public-read-write"] : []
-    resp = AWS.put(bkt.baseurl, headers; service="s3", credentials, status_exception=false)
+    resp = AWS.put(bkt.baseurl, []; service="s3", credentials, status_exception=false)
     while resp.status != 200
         if resp.status == 503
             # minio server is still starting up, so wait a bit and try again
@@ -167,6 +188,13 @@ function run(; dir=nothing, bucket=nothing, public=false, startupDelay=0.25, deb
         else
             @error resp
             throw(ArgumentError("unable to create minio bucket `$bkt`"))
+        end
+    end
+    if public
+        resp = AWS.put(bkt.baseurl * "?policy", [], publicPolicy(bkt.name); service="s3", credentials, status_exception=false)
+        if resp.status != 204
+            @error resp
+            throw(ArgumentError("unable to set minio bucket `$bkt` to public"))
         end
     end
     return Config(credentials, bkt, port, dir, p), p
