@@ -133,15 +133,18 @@ end
 str(x::T) where {T} = getfield(x, 1)
 str(::Nothing) = ""
 
-function parseAzureAccountContainerBlob(url)
+function parseAzureAccountContainerBlob(url; parseLocal::Bool=false)
+    url = string(url)
     # https://myaccount.blob.core.windows.net/mycontainer/myblob
     # https://myaccount.blob.core.windows.net/mycontainer
-    m = match(r"^https://(?<account>[^\.]+)\.(?<service>[^\.]+)\.core\.windows\.net/(?<container>[^/]+)(?:/(?<blob>.+))?$", url)
-    m !== nothing && return (String(m[:account]), String(m[:service]), String(m[:container]), String(something(m[:blob], "")))
-    # https://127.0.0.1:10000/myaccount/mycontainer/myblob
-    m = match(r"^https://127\.0\.0\.1:[\d]+/(?<account>[^\.]+?)/(?<container>[^/]+)(?:/(?<blob>.+))?$", url)
-    m !== nothing && return (String(m[:account]), "blob", String(m[:container]), String(something(m[:blob], "")))
-    throw(ArgumentError("unable to parse azure account from url: `$url`"))
+    m = match(r"^(https|azure)://(?<account>[^\.]+?)(\.(?<service>[^\.]+?)\.core\.windows\.net)?/(?<container>[^/]+?)(?:/(?<blob>.+))?$", url)
+    m !== nothing && return (true, String(m[:service]), nothing, String(m[:account]), String(m[:container]), String(something(m[:blob], "")))
+    if parseLocal
+        # "https://127.0.0.1:45942/devstoreaccount1/jl-azurite-21807/"
+        m = match(r"^(?<host>(https|azure)://[\d|\.|:]+?)/(?<account>[^/]+?)/(?<container>[^/]+?)(?:/(?<blob>.+))?$", url)
+        m !== nothing && return (true, "blob", replace(String(m[:host]), "azure" => "https"; count=1), String(m[:account]), String(m[:container]), String(something(m[:blob], "")))
+    end
+    return (false, "", nothing, "", "", "")
 end
 
 function generateAccountSASToken(url::URI, key::String;
@@ -155,7 +158,8 @@ function generateAccountSASToken(url::URI, key::String;
     signedProtocol=nothing,
     signedEncryptionScope=nothing)
 
-    account, _, _, _ = parseAzureAccountContainerBlob(string(url))
+    ok, service, host, account, container, blob = parseAzureAccountContainerBlob(url; parseLocal=true)
+    ok || throw(ArgumentError("unable to parse azure account from url: `$url`"))
     stringToSign = """$account
     $(str(signedPermission))
     $(str(signedServices))
@@ -244,7 +248,8 @@ struct SignedSnapshotTime
 end
 
 function getCanonicalizedResource(url)
-    account, service, container, blob = parseAzureAccountContainerBlob(string(url))
+    ok, service, host, account, container, blob = parseAzureAccountContainerBlob(string(url); parseLocal=true)
+    ok || throw(ArgumentError("unable to parse azure account from url: `$url`"))
     if service == "table"
         # Employees(PartitionKey='Jeff',RowKey='Price')
         # we want to regex match only Employees
