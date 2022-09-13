@@ -209,7 +209,7 @@ end # module Minio
 
 module Azurite
 
-using NodeJS_16_jll, azurite_jll, Scratch
+using NodeJS_16_jll, azurite_jll, Scratch, Dates
 import ..Config, ..findOpenPorts, ...Azure, .._cmd
 
 # azurite server directory, populated in __init__
@@ -254,6 +254,20 @@ function with(f; kw...)
     return
 end
 
+publicPolicy() = """
+<?xml version="1.0" encoding="utf-8"?>  
+<SignedIdentifiers>  
+  <SignedIdentifier>   
+    <Id>$(join(rand('a':'z', 64)))</Id>  
+    <AccessPolicy>  
+      <Start>$(Dates.today())</Start>  
+      <Expiry>$(Dates.today() + Dates.Year(1))</Expiry>  
+      <Permission>rwdl</Permission>  
+    </AccessPolicy>  
+  </SignedIdentifier>  
+</SignedIdentifiers>
+"""
+
 # use `with`, not `run`! if you `run`, it returns `conf, p`, where `p` is the server process
 # note that existing the Julia process *will not* stop the server process, which can easily
 # lead to "dangling" server processes. You can `kill(p)` to stop the server process manually
@@ -278,10 +292,17 @@ function run(; dir=nothing, container=nothing, public=false, startupDelay=0.25, 
     key = "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw=="
     credentials = Azure.Credentials(acct, key)
     headers = public ? ["x-ms-blob-public-access" => "container"] : []
-    resp = Azure.put("$(cont.baseurl)?restype=container", headers; credentials, status_exception=false, require_ssl_verification=false)
+    resp = Azure.put("$(cont.baseurl)?restype=container", headers; credentials, status_exception=false)
     if resp.status != 201
         @error resp
         throw(ArgumentError("unable to create azurite container `$(cont.name)`"))
+    end
+    if public
+        resp = Azure.put("$(cont.baseurl)?restype=container&comp=acl", ["x-ms-blob-public-access" => "container"], publicPolicy(); credentials, status_exception=false)
+        if resp.status != 200
+            @error resp
+            throw(ArgumentError("unable to set azurite container `$(cont.name)` to public"))
+        end
     end
     return Config(credentials, cont, port, dir, p), p
 end
