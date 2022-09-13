@@ -54,6 +54,12 @@ end
         AWS.put("$(bucket.baseurl)test.csv", [], csv; service="s3")
         resp = AWS.get("$(bucket.baseurl)test.csv"; service="s3")
         @test String(resp.body) == csv
+        # list is public
+        resp = AWS.get("$(bucket.baseurl)?list-type=2"; service="s3")
+        @test resp.status == 200
+        # delete is also public
+        resp = AWS.delete("$(bucket.baseurl)test.csv"; service="s3")
+        @test resp.status == 204
     end
 end
 
@@ -88,9 +94,15 @@ if !x32bit
     Azurite.with(startupDelay=3, public=true) do conf
         credentials, container = conf
         csv = "a,b,c\n1,2,3\n4,5,$(rand())"
-        Azure.put("$(container.baseurl)test", ["x-ms-blob-type" => "BlockBlob"], csv)
+        # have to supply credentials for put since "public" is only for get
+        Azure.put("$(container.baseurl)test", ["x-ms-blob-type" => "BlockBlob"], csv; credentials)
         resp = Azure.get("$(container.baseurl)test")
         @test String(resp.body) == csv
+        # list is public
+        resp = Azure.get("$(container.baseurl)?comp=list&restype=container")
+        @test resp.status == 200
+        # but delete also requires credentials
+        Azure.delete("$(container.baseurl)test"; credentials)
     end
 end
 end
