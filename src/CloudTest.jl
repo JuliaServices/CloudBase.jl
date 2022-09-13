@@ -184,7 +184,7 @@ function run(; dir=nothing, bucket=nothing, public=false, startupDelay=0.25, deb
         if resp.status == 503
             # minio server is still starting up, so wait a bit and try again
             sleep(startupDelay)
-            resp = AWS.put(bkt.baseurl, headers; service="s3", credentials, status_exception=false)
+            resp = AWS.put(bkt.baseurl, []; service="s3", credentials, status_exception=false)
         else
             @error resp
             throw(ArgumentError("unable to create minio bucket `$bkt`"))
