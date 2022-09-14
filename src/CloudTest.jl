@@ -7,8 +7,11 @@ import ..CloudCredentials, ..AWS, ..Azure, ..AbstractStore
 const INTERPRETER = Ref{String}()
 
 function __init__()
-    if success(`which patchelf`)
-        INTERPRETER[] = strip(read(`patchelf --print-interpreter $(unsafe_string(Base.JLOptions().julia_bin))`, String))
+    try
+        if success(`which patchelf`)
+            INTERPRETER[] = strip(read(`patchelf --print-interpreter $(unsafe_string(Base.JLOptions().julia_bin))`, String))
+        end
+    catch
     end
     return
 end
@@ -93,11 +96,8 @@ Base.rm(x::TempFile) = rm(x.path)
 
 module Minio
 
-using minio_jll, Scratch
+using minio_jll
 import ..Config, ..findOpenPorts, ...AWS, .._cmd
-
-# minio server directory, populated in __init__
-const MINIO_DIR = Ref{String}()
 
 """
     Minio.with(f; dir, bucket, public, startupDelay, debug)
@@ -108,8 +108,7 @@ that should be used for requests made, as well as an `AWS.Bucket`
 that is created to help bootstrap the testing process. Supported
 keyword arguments include:
   * `dir`: directory to use for the minio server, defaults to a
-    temporary directory created by `Scratch` (which is deleted
-    when the server is stopped)
+    temporary directory (which is deleted when the server is stopped)
   * `bucket`: name of the bucket to create, defaults to "test"
   * `public`: whether the bucket should be public, defaults to `false`
   * `startupDelay`: number of seconds to wait after starting the
@@ -164,9 +163,8 @@ publicPolicy(bucket) = """
 # note that existing the Julia process *will not* stop the server process, which can easily
 # lead to "dangling" server processes. You can `kill(p)` to stop the server process manually
 function run(; dir=nothing, bucket=nothing, public=false, startupDelay=0.25, debug=false)
-    isdefined(MINIO_DIR, :x) || throw(ArgumentError("minio scratch space not automatically populated; can't run minio server"))
     if dir === nothing
-        dir = mktempdir(MINIO_DIR[])
+        dir = mktempdir()
     else !isdir(dir)
         throw(ArgumentError("provided minio directory `$dir` doesn't exist; can't run minio server"))
     end
@@ -200,20 +198,12 @@ function run(; dir=nothing, bucket=nothing, public=false, startupDelay=0.25, deb
     return Config(credentials, bkt, port, dir, p), p
 end
 
-function __init__()
-    MINIO_DIR[] = @get_scratch!("MINIO_DIR")
-    return
-end
-
 end # module Minio
 
 module Azurite
 
 using NodeJS_16_jll, azurite_jll, Scratch, Dates
 import ..Config, ..findOpenPorts, ...Azure, .._cmd
-
-# azurite server directory, populated in __init__
-const AZURITE_DIR = Ref{String}()
 
 """
     Azurite.with(f; dir, bucket, public, startupDelay, debug)
@@ -224,8 +214,7 @@ that should be used for requests made, as well as an `Azure.Container`
 that is created to help bootstrap the testing process. Supported
 keyword arguments include:
   * `dir`: directory to use for the minio server, defaults to a
-    temporary directory created by `Scratch` (which is deleted
-    when the server is stopped)
+    temporary directory (which is deleted when the server is stopped)
   * `bucket`: name of the bucket to create, defaults to "test"
   * `public`: whether the bucket should be public, defaults to `false`
   * `startupDelay`: number of seconds to wait after starting the
@@ -272,9 +261,8 @@ publicPolicy() = """
 # note that existing the Julia process *will not* stop the server process, which can easily
 # lead to "dangling" server processes. You can `kill(p)` to stop the server process manually
 function run(; dir=nothing, container=nothing, public=false, startupDelay=0.25, debug=false)
-    isdefined(AZURITE_DIR, :x) || throw(ArgumentError("azurite scratch space not automatically populated; can't run azurite server"))
     if dir === nothing
-        dir = mktempdir(AZURITE_DIR[])
+        dir = mktempdir()
     else !isdir(dir)
         throw(ArgumentError("provided azurite directory `$dir` doesn't exist; can't run azurite server"))
     end
@@ -305,11 +293,6 @@ function run(; dir=nothing, container=nothing, public=false, startupDelay=0.25, 
         end
     end
     return Config(credentials, cont, port, dir, p), p
-end
-
-function __init__()
-    AZURITE_DIR[] = @get_scratch!("AZURITE_DIR")
-    return
 end
 
 end # module Azurite
