@@ -202,7 +202,7 @@ end # module Minio
 
 module Azurite
 
-using NodeJS_16_jll, azurite_jll, Scratch, Dates
+using NodeJS_16_jll, azurite_jll, Dates
 import ..Config, ..findOpenPorts, ...Azure, .._cmd
 
 """
