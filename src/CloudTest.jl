@@ -165,7 +165,7 @@ publicPolicy(bucket) = """
 function run(; dir=nothing, bucket=nothing, public=false, startupDelay=0.25, debug=false)
     if dir === nothing
         dir = mktempdir()
-    else !isdir(dir)
+    elseif !isdir(dir)
         throw(ArgumentError("provided minio directory `$dir` doesn't exist; can't run minio server"))
     end
     p, port = findOpenPorts(2) do ports
@@ -263,7 +263,7 @@ publicPolicy() = """
 function run(; dir=nothing, container=nothing, public=false, startupDelay=0.25, debug=false)
     if dir === nothing
         dir = mktempdir()
-    else !isdir(dir)
+    elseif !isdir(dir)
         throw(ArgumentError("provided azurite directory `$dir` doesn't exist; can't run azurite server"))
     end
     p, port = findOpenPorts(3) do ports
