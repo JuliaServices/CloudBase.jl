@@ -17,6 +17,8 @@ Base.show(io::IO, ::AccessToken) = print(io, "AccessToken(****)")
 
 struct SASToken <: AzureAuth
     token::String # just the query string of a SAS uri; url?sas_token
+
+    SASToken(str) = new(lstrip(String(str), '?'))
 end
 
 Base.show(io::IO, ::SASToken) = print(io, "SASToken(****)")
