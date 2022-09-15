@@ -147,7 +147,7 @@ function parseAzureAccountContainerBlob(url; parseLocal::Bool=false)
     return (false, "", nothing, "", "", "")
 end
 
-function generateAccountSASToken(url::URI, key::String;
+function generateAccountSASToken(account::String, key::String, query=Dict{String, String}();
     signedVersion=SignedVersion(),
     signedServices=SignedServices(),
     signedResourceTypes=SignedResourceTypes(),
@@ -158,8 +158,6 @@ function generateAccountSASToken(url::URI, key::String;
     signedProtocol=nothing,
     signedEncryptionScope=nothing)
 
-    ok, service, host, account, container, blob = parseAzureAccountContainerBlob(url; parseLocal=true)
-    ok || throw(ArgumentError("unable to parse azure account from url: `$url`"))
     stringToSign = """$account
     $(str(signedPermission))
     $(str(signedServices))
@@ -174,7 +172,6 @@ function generateAccountSASToken(url::URI, key::String;
     sig = base64encode(hmac_sha256(base64decode(key), stringToSign))
     # println(stringToSign)
     # @show sig
-    query = URIs.queryparams(url)
     for x in (signedVersion, signedServices, signedResourceTypes, signedPermission, signedStart, signedExpiry, signedIP, signedProtocol, signedEncryptionScope)
         if !isnothing(x)
             query[String(fieldname(typeof(x), 1))] = getfield(x, 1)
@@ -184,8 +181,14 @@ function generateAccountSASToken(url::URI, key::String;
     return URIs.escapeuri(query)
 end
 
-generateAccountSASToken(uri::String, key::String; kw...) = generateAccountSASToken(URI(uri), key; kw...)
-generateAccountSASURI(uri::URI, key::String; kw...) = URI(uri; query=generateAccountSASToken(uri, key; kw...))
+function generateAccountSASURI(uri::URI, key::String; account=nothing, kw...)
+    if account === nothing
+        ok, _, _, account, _, _ = parseAzureAccountContainerBlob(string(uri); parseLocal=true)
+        ok || throw(ArgumentError("could not parse account from URI: `$uri`"))
+    end
+    return URI(uri; query=generateAccountSASToken(account, key, queryparams(uri); kw...))
+end
+
 generateAccountSASURI(uri::String, key::String; kw...) = generateAccountSASURI(URI(uri), key; kw...)
 
 struct SignedResource

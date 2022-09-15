@@ -10,10 +10,16 @@ end
 Base.show(io::IO, x::SharedKey) = print(io, "SharedKey($(x.account), ****)")
 
 struct AccessToken <: AzureAuth
-    token::String
+    token::String # token acquired via oauth flow
 end
 
 Base.show(io::IO, ::AccessToken) = print(io, "AccessToken(****)")
+
+struct SASToken <: AzureAuth
+    token::String # just the query string of a SAS uri; url?sas_token
+end
+
+Base.show(io::IO, ::SASToken) = print(io, "SASToken(****)")
 
 mutable struct AzureCredentials <: CloudCredentials
     lock::ReentrantLock
@@ -26,12 +32,12 @@ AzureCredentials(auth::AzureAuth, expiration=nothing, expireThreshold=Dates.Minu
     AzureCredentials(ReentrantLock(), auth, expiration, expireThreshold)
 
 AzureCredentials(account::String, key::String; kw...) = AzureCredentials(SharedKey(account, key); kw...)
-AzureCredentials(token::String; kw...) = AzureCredentials(AccessToken(token); kw...)
+AzureCredentials(token::String; kw...) = AzureCredentials(contains(token, "&") ? SASToken(token) : AccessToken(token); kw...)
 
 function getCredentials(x::AzureCredentials)
     Base.@lock x.lock begin
         if expired(x)
-            azureLoadConfig!()
+            azureLoadConfig!(x.expireThreshold)
             creds = AZURE_CONFIGS["credentials"]
             x.auth = creds.auth
             x.expiration = creds.expiration
@@ -41,7 +47,7 @@ function getCredentials(x::AzureCredentials)
 end
 
 function AzureCredentials(load::Bool=true; expireThreshold=Dates.Minute(5))
-    load && azureLoadConfig!()
+    load && azureLoadConfig!(expireThreshold)
     return AZURE_CONFIGS["credentials"]
 end
 
@@ -53,7 +59,10 @@ azureConfigEnvironmentVariables() = Figgy.kmap(Figgy.EnvironmentVariables(),
     "AZURE_DEFAULTS_LOCATION" => "location",
     "AZURE_STORAGE_ACCOUNT" => "account",
     "AZURE_STORAGE_KEY" => "key",
-    "AZURE_STORAGE_SAS_TOKEN" => "sas_token"; select=true
+    "AZURE_STORAGE_SAS_TOKEN" => "sas_token",
+    "AZURE_SAS_TOKEN" => "sas_token",
+    "SAS_TOKEN" => "sas_token",
+    "AZURE_STORAGE_ACCESS_TOKEN" => "access_token"; select=true
 )
 
 azureVMConfig() = Figgy.kmap(Figgy.EnvironmentVariables(),
@@ -62,11 +71,12 @@ azureVMConfig() = Figgy.kmap(Figgy.EnvironmentVariables(),
     "AZURE_TOKEN_MI_RES_ID" => "mi_res_id",; select=true
 )
 
-function azureLoadConfig!()
+function azureLoadConfig!(expireThreshold=Dates.Minute(5))
     # on each fresh load, we want to clear out potentially stale credential fields
     # note that each load, we *will* replace AZURE_CONFIGS["credentials"]
     # so we still keep track of their history bundled together
     delete!(AZURE_CONFIGS, "sas_token")
+    delete!(AZURE_CONFIGS, "access_token")
     delete!(AZURE_CONFIGS, "account")
     delete!(AZURE_CONFIGS, "key")
     delete!(AZURE_CONFIGS, "expiration")
@@ -85,7 +95,9 @@ function azureLoadConfig!()
     exp = get(AZURE_CONFIGS, "expiration", "")
     expiration = exp === nothing ? exp : Dates.unix2datetime(exp)
     if haskey(AZURE_CONFIGS, "sas_token")
-        auth = AccessToken(AZURE_CONFIGS["sas_token"])
+        auth = SASToken(AZURE_CONFIGS["sas_token"])
+    elseif haskey(AZURE_CONFIGS, "access_token")
+        auth = AccessToken(AZURE_CONFIGS["access_token"])
     elseif haskey(AZURE_CONFIGS, "account") && haskey(AZURE_CONFIGS, "key")
         auth = SharedKey(AZURE_CONFIGS["account"], AZURE_CONFIGS["key"])
     else
@@ -111,7 +123,7 @@ function Figgy.load(x::AzureVMCredentialsSource)
     )
     resp = HTTP.get("$host/metadata/identity/oauth2/token", ["Metadata" => "true"]; query=filter(x->x.second != "", query))
     return Figgy.kmap(Figgy.JsonObject(resp.body),
-        "access_token" => "sas_token",
+        "access_token" => "access_token",
         "expires_on" => "expiration",
     )
 end
@@ -159,6 +171,12 @@ function azuresign!(request::HTTP.Request; credentials=nothing, addMd5::Bool=tru
     creds = getCredentials(credentials)
     if creds isa AccessToken
         HTTP.setheader(request, "Authorization" => "Bearer $(creds.token)")
+        return
+    elseif creds isa SASToken
+        url = request.url
+        query = url.query
+        request.url = URI(url; query=isempty(query) ? creds.token : string(query, "&", creds.token))
+        request.target = HTTP.resource(request.url)
         return
     end
 

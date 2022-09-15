@@ -87,6 +87,11 @@ if !x32bit
         resp = HTTP.put(sas, ["x-ms-blob-type" => "BlockBlob"], csv; require_ssl_verification=false)
         resp = HTTP.get(sas; require_ssl_verification=false)
         @test String(resp.body) == csv
+        # token for authorization
+        creds = Azure.Credentials(CloudBase.generateAccountSASToken(credentials.auth.account, key; signedPermission=CloudBase.SignedPermission("rw")))
+        resp = Azure.put("$(container.baseurl)test4", ["x-ms-blob-type" => "BlockBlob"], csv; credentials=creds)
+        resp = Azure.get("$(container.baseurl)test4"; credentials=creds)
+        @test String(resp.body) == csv
     end
     @test !isdir(config[].dir)
     @test success(config[].process)
@@ -157,6 +162,6 @@ end
 @testset "AzureVM" begin
     AzureVM.with() do
         CloudBase.reloadAzureVMCredentials!("http://127.0.0.1:50398")
-        @test !isempty(get(CloudBase.AZURE_CONFIGS, "sas_token", ""))
+        @test !isempty(get(CloudBase.AZURE_CONFIGS, "access_token", ""))
     end
 end
