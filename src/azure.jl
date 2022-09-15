@@ -60,6 +60,7 @@ azureConfigEnvironmentVariables() = Figgy.kmap(Figgy.EnvironmentVariables(),
     "AZURE_STORAGE_ACCOUNT" => "account",
     "AZURE_STORAGE_KEY" => "key",
     "AZURE_STORAGE_SAS_TOKEN" => "sas_token",
+    "AZURE_SAS_TOKEN" => "sas_token",
     "SAS_TOKEN" => "sas_token",
     "AZURE_STORAGE_ACCESS_TOKEN" => "access_token"; select=true
 )

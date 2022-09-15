@@ -162,6 +162,6 @@ end
 @testset "AzureVM" begin
     AzureVM.with() do
         CloudBase.reloadAzureVMCredentials!("http://127.0.0.1:50398")
-        @test !isempty(get(CloudBase.AZURE_CONFIGS, "sas_token", ""))
+        @test !isempty(get(CloudBase.AZURE_CONFIGS, "access_token", ""))
     end
 end
