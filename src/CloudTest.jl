@@ -223,10 +223,20 @@ keyword arguments include:
     to fully startup
   * `debug`: whether to turn on minio debug logging, defaults to `false`
 """
-function with(f; kw...)
-    config, proc = run(; kw...)
+function with(f; debug::Bool=false, debugLog::Union{Nothing, Ref{String}}=nothing, kw...)
+    config, proc = run(; debug, kw...)
     try
         f(config)
+    catch
+        if debug
+            log = read(joinpath(config.dir, "debug.log"), String)
+            if debugLog !== nothing
+                debugLog[] = log
+            else
+                println("AZURITE DEBUG.LOG:\n\n", log)
+            end
+        end
+        rethrow()
     finally
         kill(proc)
         i = 0
@@ -260,7 +270,7 @@ publicPolicy() = """
 # use `with`, not `run`! if you `run`, it returns `conf, p`, where `p` is the server process
 # note that existing the Julia process *will not* stop the server process, which can easily
 # lead to "dangling" server processes. You can `kill(p)` to stop the server process manually
-function run(; dir=nothing, container=nothing, public=false, startupDelay=0.25, debug=false)
+function run(; dir=nothing, container=nothing, public=false, startupDelay=3, debug=false)
     if dir === nothing
         dir = mktempdir()
     elseif !isdir(dir)
