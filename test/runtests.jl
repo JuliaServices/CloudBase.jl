@@ -165,3 +165,15 @@ end
         @test !isempty(get(CloudBase.AZURE_CONFIGS, "access_token", ""))
     end
 end
+
+# test debug logs are printed for azurite
+@testset "Azurite debug" begin
+    log = Ref{String}()
+    @test_throws HTTP.StatusError Azurite.with(debug=true, debugLog=log) do conf
+        credentials, container = conf
+        csv = "a,b,c\n1,2,3\n4,5,$(rand())"
+        # this will error since we don't have credentials
+        Azure.put("$(container.baseurl)test", ["x-ms-blob-type" => "BlockBlob"], csv)
+    end
+    @test !isempty(log[])
+end
