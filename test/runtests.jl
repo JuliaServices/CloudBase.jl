@@ -177,3 +177,22 @@ end
     end
     @test !isempty(log[])
 end
+
+# https://github.com/JuliaServices/CloudBase.jl/issues/19
+@testset "Azure SASToken idempotent" begin
+    Azurite.with(debug=true) do conf
+        credentials, container = conf
+        csv = "a,b,c\n1,2,3\n4,5,$(rand())"
+        # intentionally mess up the creds by adding "a" to the end of the query string
+        creds = Azure.Credentials(string(CloudBase.generateAccountSASToken(credentials.auth.account, credentials.auth.key; signedPermission=CloudBase.SignedPermission("rw")), "a"))
+        # the following will fail because we're missing x-ms-blob-type header
+        ex = nothing
+        try
+            Azure.put("$(container.baseurl)test", ["x-ms-blob-type" => "BlockBlob"], csv; credentials=creds)
+        catch e
+            ex = e
+        end
+        params = HTTP.URIs.queryparampairs(HTTP.URI(ex.target).query)
+        @test count(x -> x[1] == "sig", params) == 1
+    end
+end

@@ -176,8 +176,12 @@ function azuresign!(request::HTTP.Request; credentials=nothing, addMd5::Bool=tru
         return
     elseif creds isa SASToken
         url = request.url
-        query = url.query
-        request.url = URI(url; query=isempty(query) ? creds.token : string(query, "&", creds.token))
+        query = URIs.queryparampairs(url)
+        toks = URIs.queryparampairs(creds.token)
+        for pair in toks
+            HTTP.setbyfirst(query, pair)
+        end
+        request.url = URI(url; query)
         request.target = HTTP.resource(request.url)
         return
     end
