@@ -156,6 +156,7 @@ end
     EC2.with() do
         CloudBase.reloadEC2Credentials!("127.0.0.1", 50397)
         @test get(CloudBase.AWS_CONFIGS, "aws_session_token", "") == "EC2_TOKEN"
+        @test get(CloudBase.AWS_CONFIGS, "region", "") == "us-west-1"
     end
 end
 
