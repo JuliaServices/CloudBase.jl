@@ -361,6 +361,8 @@ function with(f)
             return HTTP.Response(200, "testRole")
         elseif req.method == "GET" && req.target == "/latest/meta-data/iam/security-credentials/testRole"
             return HTTP.Response(200, RESP)
+        elseif req.method == "GET" && req.target == "/latest/meta-data/placement/region"
+            return HTTP.Response(200, "us-west-1")
         else
             return HTTP.Response(404)
         end

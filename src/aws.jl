@@ -155,6 +155,8 @@ function Figgy.load(x::EC2CredentialsSource)
     # https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/identify_ec2_instances.html
     canconnect(host, port) || return ()
     role = String(HTTP.get("http://$host:$port/latest/meta-data/iam/security-credentials/").body)
+    region = String(HTTP.get("http://$host:$port/latest/meta-data/placement/region").body)
+    Figgy.load!(AWS_CONFIGS, "region" => region)
     return Figgy.kmap(Figgy.JsonObject(HTTP.get("http://$host:$port/latest/meta-data/iam/security-credentials/$role").body),
         "AccessKeyId" => "aws_access_key_id",
         "SecretAccessKey" => "aws_secret_access_key",
