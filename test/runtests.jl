@@ -197,3 +197,21 @@ end
         @test count(x -> x[1] == "sig", params) == 1
     end
 end
+
+# metrics hooks
+@time @testset "Cloud metrics hooks" begin
+    Minio.with(startupDelay=3) do conf
+        credentials, bucket = conf
+        prereq_ref = Ref(0)
+        metrics_ref = Ref{Any}()
+        CloudBase.PREREQUEST_CALLBACK[] = () -> prereq_ref[] += 1
+        CloudBase.METRICS_CALLBACK[] = (args...) -> metrics_ref[] = args
+        csv = "a,b,c\n1,2,3\n4,5,$(rand())"
+        AWS.put("$(bucket.baseurl)test.csv", [], csv; service="s3", credentials)
+        @test prereq_ref[] == 1
+        @test metrics_ref[] isa Tuple
+        resp = AWS.get("$(bucket.baseurl)test.csv"; service="s3", credentials)
+        @test String(resp.body) == csv
+        @test prereq_ref[] == 2
+    end
+end

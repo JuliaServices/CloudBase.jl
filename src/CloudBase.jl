@@ -4,6 +4,7 @@ export CloudTest
 
 using Dates, Base64, Sockets
 using HTTP, URIs, SHA, MD5, LoggingExtras, Figgy
+import FunctionWrappers: FunctionWrapper
 
 """
     CloudCredentials
@@ -48,18 +49,46 @@ expired(x) = x.expiration !== nothing && Dates.now(Dates.UTC) > (x.expiration - 
 include("aws.jl")
 include("azure.jl")
 
+
+prerequest() = nothing
+metrics(request_failed::Bool, request_retries::Int, request_duration_ms::Float64, bytes_sent::Int, bytes_received::Int) = nothing
+
+const PREREQUEST_CALLBACK = Ref{FunctionWrapper{Nothing, Tuple{}}}()
+const METRICS_CALLBACK = Ref{FunctionWrapper{Nothing, Tuple{Bool, Int64, Float64, Int64, Int64}}}()
+
 # custom stream layer to be included right before actual request
 # is sent to ensure header timestamps are as correct as possible
 function cloudsignlayer(handler)
     function cloudsign(stream; aws::Bool=false, awsv2::Bool=false, azure::Bool=false, kw...)
+        failed = false
+        bytes_sent = bytes_received = 0
+        start = time()
+        PREREQUEST_CALLBACK[]()
         req = stream.message.request
-        if awsv2
-            awssignv2!(req; kw...)
-        elseif aws
-            awssign!(req; kw...)
+        try
+            if awsv2
+                awssignv2!(req; kw...)
+            elseif aws
+                awssign!(req; kw...)
+            end
+            azure && azuresign!(req; kw...)
+            resp = handler(stream; kw...)
+            bytes_sent = parse(Int, HTTP.header(req, "Content-Length", "0"))
+            clen = HTTP.header(resp, "Content-Length", "")
+            if clen == ""
+                b = resp.body
+                bytes_received = b isa Vector{UInt8} ? length(b) : b isa IO ? bytesavailable(b) : 0
+            else
+                bytes_received = parse(Int, clen)
+            end
+            return resp
+        catch
+            failed = true
+            rethrow()
+        finally
+            retries = get(req.context, :retryattempt, 0)
+            METRICS_CALLBACK[](failed, retries, (time() - start) / 1000, bytes_sent, bytes_received)
         end
-        azure && azuresign!(req; kw...)
-        return handler(stream; kw...)
     end
 end
 
@@ -213,5 +242,11 @@ end
 end # module Azure
 
 include("CloudTest.jl")
+
+function __init__()
+    PREREQUEST_CALLBACK[] = prerequest
+    METRICS_CALLBACK[] = metrics
+    return
+end
 
 end # module CloudBase
