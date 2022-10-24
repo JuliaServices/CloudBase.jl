@@ -132,7 +132,7 @@ function with(f; dir=nothing, kw...)
                 break # give up waiting for process to finish
             end
         end
-        dir !== nothing && rm(config.dir; force=true, recursive=true)
+        dir === nothing && rm(config.dir; force=true, recursive=true)
     end
     return
 end
@@ -248,7 +248,7 @@ function with(f; dir=nothing, debug::Bool=false, debugLog::Union{Nothing, Ref{St
                 break # give up waiting for process to finish
             end
         end
-        dir !== nothing && rm(config.dir; force=true, recursive=true)
+        dir === nothing && rm(config.dir; force=true, recursive=true)
     end
     return
 end
