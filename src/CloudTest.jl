@@ -117,8 +117,8 @@ keyword arguments include:
     to fully startup
   * `debug`: whether to turn on minio debug logging, defaults to `false`
 """
-function with(f; kw...)
-    config, proc = run(; kw...)
+function with(f; dir=nothing, kw...)
+    config, proc = run(; dir, kw...)
     try
         f(config)
     finally
@@ -132,7 +132,7 @@ function with(f; kw...)
                 break # give up waiting for process to finish
             end
         end
-        rm(config.dir; force=true, recursive=true)
+        dir !== nothing && rm(config.dir; force=true, recursive=true)
     end
     return
 end
@@ -223,8 +223,8 @@ keyword arguments include:
     to fully startup
   * `debug`: whether to turn on minio debug logging, defaults to `false`
 """
-function with(f; debug::Bool=false, debugLog::Union{Nothing, Ref{String}}=nothing, kw...)
-    config, proc = run(; debug, kw...)
+function with(f; dir=nothing, debug::Bool=false, debugLog::Union{Nothing, Ref{String}}=nothing, kw...)
+    config, proc = run(; dir, debug, kw...)
     try
         f(config)
     catch
@@ -248,7 +248,7 @@ function with(f; debug::Bool=false, debugLog::Union{Nothing, Ref{String}}=nothin
                 break # give up waiting for process to finish
             end
         end
-        rm(config.dir; force=true, recursive=true)
+        dir !== nothing && rm(config.dir; force=true, recursive=true)
     end
     return
 end
