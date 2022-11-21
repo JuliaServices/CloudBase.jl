@@ -8,7 +8,10 @@ const INTERPRETER = Ref{String}()
 
 function __init__()
     try
-        if success(`which patchelf`)
+        # When using julia from nix, set INTERPRETER, to make sure the correct
+        # dynamic loader and glibc is used (e.g. in case of glibc mismatch between
+        # nix build and system glibc).
+        if startswith(Base.julia_cmd()[1], "/nix/") && success(`which patchelf`)
             INTERPRETER[] = strip(read(`patchelf --print-interpreter $(unsafe_string(Base.JLOptions().julia_bin))`, String))
         end
     catch
@@ -27,9 +30,9 @@ julia> run(_cmd(`ls`))
 ```
 """
 function _cmd(tool)
-    # When on NixOS, or inside nix build where /lib64/ld-linux-x86-64.so.2 is not available,
+    # When on system (mostly NixOS) where /lib64/ld-linux-x86-64.so.2 is not available,
     # use the ELF interpreter from the julia binary
-    if Sys.islinux() && !ispath("/lib64/ld-linux-x86-64.so.2") && isdefined(INTERPRETER, :x)
+    if Sys.islinux() && isdefined(INTERPRETER, :x)
         pushfirst!(tool.exec, INTERPRETER[])
     end
     return tool
