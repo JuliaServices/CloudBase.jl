@@ -105,7 +105,7 @@ module AWS
 using HTTP
 import ..cloudsignlayer, ..AWSCredentials, ..AbstractStore, ..AWS_DEFAULT_REGION
 
-awslayer(handler) = (req; kw...) -> handler(req; kw..., aws=true, readtimeout=30)
+awslayer(handler) = (req; kw...) -> handler(req; kw..., aws=true, readtimeout=300)
 
 HTTP.@client (first=(awslayer,), last=()) (first=(), last=(cloudsignlayer,))
 
@@ -182,7 +182,7 @@ module Azure
 using HTTP
 import ..cloudsignlayer, ..AzureCredentials, ..AbstractStore
 
-azurelayer(handler) = (req; kw...) -> handler(req; azure=true, aws=false, awsv2=false, readtimeout=30, require_ssl_verification=req.url.host != "127.0.0.1", kw...)
+azurelayer(handler) = (req; kw...) -> handler(req; azure=true, aws=false, awsv2=false, readtimeout=300, require_ssl_verification=req.url.host != "127.0.0.1", kw...)
 
 HTTP.@client (first=(azurelayer,), last=()) (first=(), last=(cloudsignlayer,))
 
