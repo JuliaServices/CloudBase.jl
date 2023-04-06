@@ -130,13 +130,17 @@ function Figgy.load(x::ECSCredentialsSource)
     ))
     url = get(AWS_CONFIGS, "container_credentials_relative_uri", "")
     isempty(url) && return ()
-    return Figgy.kmap(Figgy.JsonObject(HTTP.get("$host$url").body),
-        "AccessKeyId" => "aws_access_key_id",
-        "SecretAccessKey" => "aws_secret_access_key",
-        "Token" => "aws_session_token",
-        "Expiration" => "expiration",
-        "RoleArn" => "role_arn",
-    )
+    try
+        return Figgy.kmap(Figgy.JsonObject(HTTP.get("$host$url").body),
+            "AccessKeyId" => "aws_access_key_id",
+            "SecretAccessKey" => "aws_secret_access_key",
+            "Token" => "aws_session_token",
+            "Expiration" => "expiration",
+            "RoleArn" => "role_arn",
+        )
+    catch
+        return ()
+    end
 end
 reloadECSCredentials!(ecsHost=nothing) = Figgy.load!(AWS_CONFIGS, ECSCredentialsSource(ecsHost))
 
@@ -154,16 +158,20 @@ function Figgy.load(x::EC2CredentialsSource)
     # check if we have necessary config to fetch EC2 creds
     # https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/identify_ec2_instances.html
     canconnect(host, port) || return ()
-    role = String(HTTP.get("http://$host:$port/latest/meta-data/iam/security-credentials/").body)
-    region = String(HTTP.get("http://$host:$port/latest/meta-data/placement/region").body)
-    Figgy.load!(AWS_CONFIGS, "region" => region)
-    return Figgy.kmap(Figgy.JsonObject(HTTP.get("http://$host:$port/latest/meta-data/iam/security-credentials/$role").body),
-        "AccessKeyId" => "aws_access_key_id",
-        "SecretAccessKey" => "aws_secret_access_key",
-        "Token" => "aws_session_token",
-        "Expiration" => "expiration",
-        "RoleArn" => "role_arn",
-    )
+    try
+        role = String(HTTP.get("http://$host:$port/latest/meta-data/iam/security-credentials/").body)
+        region = String(HTTP.get("http://$host:$port/latest/meta-data/placement/region").body)
+        Figgy.load!(AWS_CONFIGS, "region" => region)
+        return Figgy.kmap(Figgy.JsonObject(HTTP.get("http://$host:$port/latest/meta-data/iam/security-credentials/$role").body),
+            "AccessKeyId" => "aws_access_key_id",
+            "SecretAccessKey" => "aws_secret_access_key",
+            "Token" => "aws_session_token",
+            "Expiration" => "expiration",
+            "RoleArn" => "role_arn",
+        )
+    catch
+        return ()
+    end
 end
 reloadEC2Credentials!(ecsHost="169.254.169.254", port=80) = Figgy.load!(AWS_CONFIGS, EC2CredentialsSource(ecsHost, port))
 
