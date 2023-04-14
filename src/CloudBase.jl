@@ -50,11 +50,11 @@ include("aws.jl")
 include("azure.jl")
 
 
-prerequest() = nothing
-metrics(request_failed::Bool, request_retries::Int, request_duration_ms::Float64, bytes_sent::Int, bytes_received::Int) = nothing
+prerequest(method::String) = nothing
+metrics(method::String, request_failed::Bool, request_retries::Int, request_duration_ms::Float64, bytes_sent::Int, bytes_received::Int, connect_errors::Int, io_errors::Int, status_errors::Int, timeout_errors::Int, connect_duration_ms::Float64, ssl_connect_duration_ms::Float64, read_duration_ms::Float64, write_duration_ms::Float64) = nothing
 
-const PREREQUEST_CALLBACK = Ref{FunctionWrapper{Nothing, Tuple{}}}()
-const METRICS_CALLBACK = Ref{FunctionWrapper{Nothing, Tuple{Bool, Int64, Float64, Int64, Int64}}}()
+const PREREQUEST_CALLBACK = Ref{FunctionWrapper{Nothing, Tuple{String}}}()
+const METRICS_CALLBACK = Ref{FunctionWrapper{Nothing, Tuple{String, Bool, Int64, Float64, Int64, Int64, Int64, Int64, Int64, Int64, Float64, Float64, Float64, Float64}}}()
 
 function cloudmetricslayer(handler)
     function cloudmetrics(req; kw...)
