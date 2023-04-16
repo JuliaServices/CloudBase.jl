@@ -81,7 +81,11 @@ function cloudmetricslayer(handler)
             timeout_errors = get(req.context, :timeout_errors, 0)
             connect_duration_ms = get(req.context, :connect_duration_ms, 0.0)
             ssl_connect_duration_ms = get(req.context, :ssl_connect_duration_ms, 0.0)
-            METRICS_CALLBACK[](req.method, failed, retries, (time() - start) * 1000, bytes_sent, bytes_received,
+            dur = (time() - start) * 1000
+            if dur > 50_000
+                @error "Super long cloud request:" bytes_received=bytes_received bytes_sent=bytes_sent connect_errors=connect_errors io_errors=io_errors status_errors=status_errors timeout_errors=timeout_errors connect_duration_ms=connect_duration_ms ssl_connect_duration_ms=ssl_connect_duration_ms read_duration_ms=read_duration_ms write_duration_ms=write_duration_ms total_duration_ms=dur retries=retries method=req.method url=req.url
+            end
+            METRICS_CALLBACK[](req.method, failed, retries, dur, bytes_sent, bytes_received,
                 connect_errors, io_errors, status_errors, timeout_errors,
                 connect_duration_ms, ssl_connect_duration_ms, read_duration_ms, write_duration_ms)
         end
