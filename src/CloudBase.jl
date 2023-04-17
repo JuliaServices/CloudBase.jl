@@ -83,7 +83,7 @@ function cloudmetricslayer(handler)
             ssl_connect_duration_ms = get(req.context, :ssl_connect_duration_ms, 0.0)
             dur = (time() - start) * 1000
             if dur > 50_000
-                @error "Super long cloud request:" total_duration_ms=dur request=req
+                @error "Super long cloud request:" total_duration_ms=dur method=req.method context=req.context
             end
             METRICS_CALLBACK[](req.method, failed, retries, dur, bytes_sent, bytes_received,
                 connect_errors, io_errors, status_errors, timeout_errors,
