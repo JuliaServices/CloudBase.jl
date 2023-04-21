@@ -51,16 +51,16 @@ include("azure.jl")
 
 
 prerequest(method::String) = nothing
-metrics(method::String, request_failed::Bool, request_retries::Int, request_duration_ms::Float64, bytes_sent::Int, bytes_received::Int, connect_errors::Int, io_errors::Int, status_errors::Int, timeout_errors::Int, connect_duration_ms::Float64, ssl_connect_duration_ms::Float64, read_duration_ms::Float64, write_duration_ms::Float64) = nothing
+metrics(method::String, request_failed::Bool, request_retries::Int, request_duration_ms::Float64, bytes_sent::Int, bytes_received::Int, connect_errors::Int, io_errors::Int, status_errors::Int, timeout_errors::Int, connect_duration_ms::Float64, read_duration_ms::Float64, write_duration_ms::Float64) = nothing
 
 const PREREQUEST_CALLBACK = Ref{FunctionWrapper{Nothing, Tuple{String}}}()
-const METRICS_CALLBACK = Ref{FunctionWrapper{Nothing, Tuple{String, Bool, Int64, Float64, Int64, Int64, Int64, Int64, Int64, Int64, Float64, Float64, Float64, Float64}}}()
+const METRICS_CALLBACK = Ref{FunctionWrapper{Nothing, Tuple{String, Bool, Int64, Float64, Int64, Int64, Int64, Int64, Int64, Int64, Float64, Float64, Float64}}}()
 
 function cloudmetricslayer(handler)
-    function cloudmetrics(req; kw...)
+    function cloudmetrics(req; logexceptionalduration::Int=0, kw...)
         failed = false
         bytes_sent = bytes_received = connect_errors = io_errors = status_errors = timeout_errors = 0
-        connect_duration_ms = ssl_connect_duration_ms = read_duration_ms = write_duration_ms = 0.0
+        connect_duration_ms = read_duration_ms = write_duration_ms = 0.0
         start = time()
         PREREQUEST_CALLBACK[](req.method)
         try
@@ -80,14 +80,13 @@ function cloudmetricslayer(handler)
             status_errors = get(req.context, :status_errors, 0)
             timeout_errors = get(req.context, :timeout_errors, 0)
             connect_duration_ms = get(req.context, :connect_duration_ms, 0.0)
-            ssl_connect_duration_ms = get(req.context, :ssl_connect_duration_ms, 0.0)
             dur = (time() - start) * 1000
-            if dur > 50_000
-                @error "Super long cloud request:" total_duration_ms=dur method=req.method context=req.context
+            if logexceptionalduration > 0 && dur > logexceptionalduration
+                @error "Exceptionally long cloud request:" total_duration_ms=dur method=req.method context=req.context
             end
             METRICS_CALLBACK[](req.method, failed, retries, dur, bytes_sent, bytes_received,
                 connect_errors, io_errors, status_errors, timeout_errors,
-                connect_duration_ms, ssl_connect_duration_ms, read_duration_ms, write_duration_ms)
+                connect_duration_ms, read_duration_ms, write_duration_ms)
         end
     end
 end
