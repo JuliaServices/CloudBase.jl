@@ -204,7 +204,7 @@ end
         credentials, bucket = conf
         prereq_ref = Ref(0)
         metrics_ref = Ref{Any}()
-        CloudBase.PREREQUEST_CALLBACK[] = () -> prereq_ref[] += 1
+        CloudBase.PREREQUEST_CALLBACK[] = (m) -> prereq_ref[] += 1
         CloudBase.METRICS_CALLBACK[] = (args...) -> metrics_ref[] = args
         csv = "a,b,c\n1,2,3\n4,5,$(rand())"
         AWS.put("$(bucket.baseurl)test.csv", [], csv; service="s3", credentials)

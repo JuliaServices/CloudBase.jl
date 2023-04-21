@@ -50,45 +50,59 @@ include("aws.jl")
 include("azure.jl")
 
 
-prerequest() = nothing
-metrics(request_failed::Bool, request_retries::Int, request_duration_ms::Float64, bytes_sent::Int, bytes_received::Int) = nothing
+prerequest(method::String) = nothing
+metrics(method::String, request_failed::Bool, request_retries::Int, request_duration_ms::Float64, bytes_sent::Int, bytes_received::Int, connect_errors::Int, io_errors::Int, status_errors::Int, timeout_errors::Int, connect_duration_ms::Float64, read_duration_ms::Float64, write_duration_ms::Float64) = nothing
 
-const PREREQUEST_CALLBACK = Ref{FunctionWrapper{Nothing, Tuple{}}}()
-const METRICS_CALLBACK = Ref{FunctionWrapper{Nothing, Tuple{Bool, Int64, Float64, Int64, Int64}}}()
+const PREREQUEST_CALLBACK = Ref{FunctionWrapper{Nothing, Tuple{String}}}()
+const METRICS_CALLBACK = Ref{FunctionWrapper{Nothing, Tuple{String, Bool, Int64, Float64, Int64, Int64, Int64, Int64, Int64, Int64, Float64, Float64, Float64}}}()
 
-# custom stream layer to be included right before actual request
-# is sent to ensure header timestamps are as correct as possible
-function cloudsignlayer(handler)
-    function cloudsign(stream; aws::Bool=false, awsv2::Bool=false, azure::Bool=false, kw...)
+function cloudmetricslayer(handler)
+    function cloudmetrics(req; logexceptionalduration::Int=0, kw...)
         failed = false
-        bytes_sent = bytes_received = 0
+        bytes_sent = bytes_received = connect_errors = io_errors = status_errors = timeout_errors = 0
+        connect_duration_ms = read_duration_ms = write_duration_ms = 0.0
         start = time()
-        PREREQUEST_CALLBACK[]()
-        req = stream.message.request
+        PREREQUEST_CALLBACK[](req.method)
         try
-            if awsv2
-                awssignv2!(req; kw...)
-            elseif aws
-                awssign!(req; kw...)
-            end
-            azure && azuresign!(req; kw...)
-            resp = handler(stream; kw...)
-            bytes_sent = parse(Int, HTTP.header(req, "Content-Length", "0"))
-            clen = HTTP.header(resp, "Content-Length", "")
-            if clen == ""
-                b = resp.body
-                bytes_received = b isa Vector{UInt8} ? length(b) : b isa IO ? bytesavailable(b) : 0
-            else
-                bytes_received = parse(Int, clen)
-            end
+            resp = handler(req; kw...)
+            bytes_received = get(req.context, :nbytes, 0)
+            bytes_sent = get(req.context, :nbytes_written, 0)
+            read_duration_ms = get(req.context, :read_duration_ms, 0.0)
+            write_duration_ms = get(req.context, :write_duration_ms, 0.0)
             return resp
         catch
             failed = true
             rethrow()
         finally
             retries = get(req.context, :retryattempt, 0)
-            METRICS_CALLBACK[](failed, retries, (time() - start) / 1000, bytes_sent, bytes_received)
+            connect_errors = get(req.context, :connect_errors, 0)
+            io_errors = get(req.context, :io_errors, 0)
+            status_errors = get(req.context, :status_errors, 0)
+            timeout_errors = get(req.context, :timeout_errors, 0)
+            connect_duration_ms = get(req.context, :connect_duration_ms, 0.0)
+            dur = (time() - start) * 1000
+            if logexceptionalduration > 0 && dur > logexceptionalduration
+                @error "Exceptionally long cloud request:" total_duration_ms=dur method=req.method context=req.context
+            end
+            METRICS_CALLBACK[](req.method, failed, retries, dur, bytes_sent, bytes_received,
+                connect_errors, io_errors, status_errors, timeout_errors,
+                connect_duration_ms, read_duration_ms, write_duration_ms)
         end
+    end
+end
+
+# custom stream layer to be included right before actual request
+# is sent to ensure header timestamps are as correct as possible
+function cloudsignlayer(handler)
+    function cloudsign(stream; aws::Bool=false, awsv2::Bool=false, azure::Bool=false, kw...)
+        req = stream.message.request
+        if awsv2
+            awssignv2!(req; kw...)
+        elseif aws
+            awssign!(req; kw...)
+        end
+        azure && azuresign!(req; kw...)
+        return handler(stream; kw...)
     end
 end
 
@@ -103,11 +117,11 @@ just like the `HTTP` equivalents and supports all the same keyword arguments.
 module AWS
 
 using HTTP
-import ..cloudsignlayer, ..AWSCredentials, ..AbstractStore, ..AWS_DEFAULT_REGION
+import ..cloudsignlayer, ..cloudmetricslayer, ..AWSCredentials, ..AbstractStore, ..AWS_DEFAULT_REGION
 
-awslayer(handler) = (req; kw...) -> handler(req; kw..., aws=true, readtimeout=300)
+awslayer(handler) = (req; kw...) -> handler(req; kw..., aws=true, logerrors=true, readtimeout=300)
 
-HTTP.@client (first=(awslayer,), last=()) (first=(), last=(cloudsignlayer,))
+HTTP.@client (first=(awslayer, cloudmetricslayer), last=()) (first=(), last=(cloudsignlayer,))
 
 const DOCS = """
     AWS.get(url, headers, body; credentials, awsv2=false, kw...)
@@ -180,11 +194,11 @@ just like the `HTTP` equivalents and supports all the same keyword arguments.
 module Azure
 
 using HTTP
-import ..cloudsignlayer, ..AzureCredentials, ..AbstractStore
+import ..cloudsignlayer, ..cloudmetricslayer, ..AzureCredentials, ..AbstractStore
 
-azurelayer(handler) = (req; kw...) -> handler(req; azure=true, aws=false, awsv2=false, readtimeout=300, require_ssl_verification=req.url.host != "127.0.0.1", kw...)
+azurelayer(handler) = (req; kw...) -> handler(req; azure=true, aws=false, awsv2=false, logerrors=true, readtimeout=300, require_ssl_verification=req.url.host != "127.0.0.1", kw...)
 
-HTTP.@client (first=(azurelayer,), last=()) (first=(), last=(cloudsignlayer,))
+HTTP.@client (first=(azurelayer, cloudmetricslayer), last=()) (first=(), last=(cloudsignlayer,))
 
 const DOCS = """
     Azure.get(url, headers, body; credentials, kw...)
