@@ -81,8 +81,8 @@ function cloudmetricslayer(handler)
             timeout_errors = get(req.context, :timeout_errors, 0)
             connect_duration_ms = get(req.context, :connect_duration_ms, 0.0)
             dur = (time() - start) * 1000
-            if logexceptionalduration > 0 && dur > logexceptionalduration
-                @error "Exceptionally long cloud request:" total_duration_ms=dur method=req.method context=req.context
+            if logexceptionalduration > 0 && div(dur, 1000) > logexceptionalduration
+                @warn "Exceptionally long cloud request:" total_duration_ms=dur method=req.method context=req.context
             end
             METRICS_CALLBACK[](req.method, failed, retries, dur, bytes_sent, bytes_received,
                 connect_errors, io_errors, status_errors, timeout_errors,
