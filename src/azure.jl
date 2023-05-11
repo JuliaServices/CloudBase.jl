@@ -131,7 +131,7 @@ function Figgy.load(x::AzureVMCredentialsSource)
 end
 reloadAzureVMCredentials!(vmHost=nothing) = Figgy.load!(AZURE_CONFIGS, AzureVMCredentialsSource(vmHost))
 
-const AZURE_API_VERSION = "2020-04-08"
+const AZURE_API_VERSION = "2021-04-10"
 const RFC1123Format = dateformat"e, dd u yyyy HH:MM:SS \G\M\T"
 trimall2(x) = strip(replace(x, r"[\s]{2,}" => " "))
 
