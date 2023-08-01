@@ -179,6 +179,17 @@ end
     @test !isempty(log[])
 end
 
+@testset "Azurite without SSL" begin
+    Azurite.with(debug=false, use_ssl=false) do conf
+        credentials, container = conf
+        @test startswith(container.baseurl, "http://") # instead of https://
+        data = "this is a test!"
+        Azure.put("$(container.baseurl)test", ["x-ms-blob-type" => "BlockBlob"], data; credentials)
+        resp = Azure.get("$(container.baseurl)test"; credentials)
+        @test String(resp.body) == data
+    end
+end
+
 # https://github.com/JuliaServices/CloudBase.jl/issues/19
 @testset "Azure SASToken idempotent" begin
     Azurite.with(debug=true) do conf

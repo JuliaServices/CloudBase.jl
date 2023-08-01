@@ -273,7 +273,7 @@ publicPolicy() = """
 # use `with`, not `run`! if you `run`, it returns `conf, p`, where `p` is the server process
 # note that existing the Julia process *will not* stop the server process, which can easily
 # lead to "dangling" server processes. You can `kill(p)` to stop the server process manually
-function run(; dir=nothing, container=nothing, public=false, startupDelay=3, debug=false)
+function run(; dir=nothing, container=nothing, public=false, startupDelay=3, debug=false, use_ssl=true)
     if dir === nothing
         dir = mktempdir()
     elseif !isdir(dir)
@@ -281,15 +281,20 @@ function run(; dir=nothing, container=nothing, public=false, startupDelay=3, deb
     end
     p, port = findOpenPorts(3) do ports
         port, qport, tport = ports
-        cert = joinpath(@__DIR__, "test.cert")
-        key = joinpath(@__DIR__, "test.key")
-        cmd = _cmd(`$(node()) $(azurite) -l $dir -d $(joinpath(dir, "debug.log")) --blobPort $port --queuePort $qport --tablePort $tport --cert $cert --key $key --oauth basic`)
+        cmd_args = ["-l", dir, "-d", joinpath(dir, "debug.log"), "--blobPort", port, "--queuePort", qport, "--tablePort", tport, "--oauth", "basic"]
+        if (use_ssl)
+            cert = joinpath(@__DIR__, "test.cert")
+            key = joinpath(@__DIR__, "test.key")
+            push!(cmd_args, "--cert", cert, "--key", key)
+        end
+        cmd = _cmd(`$(node()) $(azurite) $(cmd_args)`)
         p = debug ? Base.run(cmd, devnull, stderr, stderr; wait=false) : Base.run(cmd; wait=false)
         sleep(startupDelay) # sleep just a little for server startup
         return p, port
     end
     acct = "devstoreaccount1"
-    cont = Azure.Container(something(container, "jl-azurite-$(abs(rand(Int16)))"), acct; host="https://127.0.0.1:$port")
+    protocol = use_ssl ? "https" : "http"
+    cont = Azure.Container(something(container, "jl-azurite-$(abs(rand(Int16)))"), acct; host="$protocol://127.0.0.1:$port")
     key = "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw=="
     credentials = Azure.Credentials(acct, key)
     headers = public ? ["x-ms-blob-public-access" => "container"] : []
