@@ -158,7 +158,7 @@ publicPolicy(bucket) = """
         "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:GetObjectVersion", "s3:DeleteObjectVersion"],
         "Resource":"arn:aws:s3:::$bucket/*"
     }
- ] 
+ ]
 }
 """
 
@@ -273,7 +273,7 @@ publicPolicy() = """
 # use `with`, not `run`! if you `run`, it returns `conf, p`, where `p` is the server process
 # note that existing the Julia process *will not* stop the server process, which can easily
 # lead to "dangling" server processes. You can `kill(p)` to stop the server process manually
-function run(; dir=nothing, container=nothing, public=false, startupDelay=3, debug=false, use_ssl=true)
+function run(; dir=nothing, container=nothing, public=false, startupDelay=3, debug=false, use_ssl=true, skipApiVersionCheck=false)
     if dir === nothing
         dir = mktempdir()
     elseif !isdir(dir)
@@ -282,11 +282,13 @@ function run(; dir=nothing, container=nothing, public=false, startupDelay=3, deb
     p, port = findOpenPorts(3) do ports
         port, qport, tport = ports
         cmd_args = ["-l", dir, "-d", joinpath(dir, "debug.log"), "--blobPort", port, "--queuePort", qport, "--tablePort", tport, "--oauth", "basic"]
-        if (use_ssl)
+        if use_ssl
             cert = joinpath(@__DIR__, "test.cert")
             key = joinpath(@__DIR__, "test.key")
             push!(cmd_args, "--cert", cert, "--key", key)
         end
+        # Avoid checking whether the Azure API version is compatible with the client?
+        skipApiVersionCheck && push!(cmd_args, "--skipApiVersionCheck")
         cmd = _cmd(`$(node()) $(azurite) $(cmd_args)`)
         p = debug ? Base.run(cmd, devnull, stderr, stderr; wait=false) : Base.run(cmd; wait=false)
         sleep(startupDelay) # sleep just a little for server startup
