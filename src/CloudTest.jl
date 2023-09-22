@@ -165,7 +165,7 @@ publicPolicy(bucket) = """
 # use `with`, not `run`! if you `run`, it returns `conf, p`, where `p` is the server process
 # note that existing the Julia process *will not* stop the server process, which can easily
 # lead to "dangling" server processes. You can `kill(p)` to stop the server process manually
-function run(; dir=nothing, bucket=nothing, public=false, startupDelay=0.25, debug=false, bindIP="")
+function run(; dir=nothing, bucket=nothing, public=false, startupDelay=0.25, debug=false, bindIP="127.0.0.1")
     if dir === nothing
         dir = mktempdir()
     elseif !isdir(dir)
