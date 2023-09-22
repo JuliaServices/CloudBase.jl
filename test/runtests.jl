@@ -37,7 +37,7 @@ end
 
 @time @testset "AWS" begin
     config = Ref{Any}()
-    Minio.with(startupDelay=3) do conf
+    Minio.with(bindIP="127.0.0.1", startupDelay=3) do conf
         config[] = conf
         credentials, bucket = conf
         csv = "a,b,c\n1,2,3\n4,5,$(rand())"
@@ -48,7 +48,7 @@ end
     @test !isdir(config[].dir)
     @test success(config[].process)
     # test public access
-    Minio.with(startupDelay=3, public=true) do conf
+    Minio.with(bindIP="127.0.0.1", startupDelay=3, public=true) do conf
         credentials, bucket = conf
         csv = "a,b,c\n1,2,3\n4,5,$(rand())"
         AWS.put("$(bucket.baseurl)test.csv", [], csv; service="s3")
@@ -116,7 +116,7 @@ end
     mconfigs = Vector{Any}(undef, 10)
     aconfigs = Vector{Any}(undef, 10)
     @sync for i = 1:10
-        @async Minio.with(startupDelay=3) do conf
+        @async Minio.with(bindIP="127.0.0.1", startupDelay=3) do conf
             mconfigs[i] = conf
             credentials, bucket = conf
             csv = "a,b,c\n1,2,3\n4,5,$(rand())"
@@ -211,7 +211,7 @@ end
 
 # metrics hooks
 @time @testset "Cloud metrics hooks" begin
-    Minio.with(startupDelay=3) do conf
+    Minio.with(bindIP="127.0.0.1", startupDelay=3) do conf
         credentials, bucket = conf
         prereq_ref = Ref(0)
         metrics_ref = Ref{Any}()
