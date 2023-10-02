@@ -165,7 +165,7 @@ publicPolicy(bucket) = """
 # use `with`, not `run`! if you `run`, it returns `conf, p`, where `p` is the server process
 # note that existing the Julia process *will not* stop the server process, which can easily
 # lead to "dangling" server processes. You can `kill(p)` to stop the server process manually
-function run(; dir=nothing, bucket=nothing, public=false, startupDelay=0.25, debug=false)
+function run(; dir=nothing, bucket=nothing, public=false, startupDelay=0.25, debug=false, bindIP="127.0.0.1")
     if dir === nothing
         dir = mktempdir()
     elseif !isdir(dir)
@@ -173,7 +173,7 @@ function run(; dir=nothing, bucket=nothing, public=false, startupDelay=0.25, deb
     end
     p, port = findOpenPorts(2) do ports
         port, cport = ports
-        cmd = _cmd(`$(minio_jll.minio()) server $dir --address :$(port) --console-address :$(cport)`)
+        cmd = _cmd(`$(minio_jll.minio()) server $dir --address $(bindIP):$(port) --console-address $(bindIP):$(cport)`)
         p = debug ? Base.run(cmd, devnull, stderr, stderr; wait=false) : Base.run(cmd; wait=false)
         sleep(startupDelay) # sleep just a little for server startup
         return p, port
