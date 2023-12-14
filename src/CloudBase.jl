@@ -3,7 +3,8 @@ module CloudBase
 export CloudTest
 
 using Dates, Base64, Sockets
-using HTTP, URIs, SHA, MD5, LoggingExtras, Figgy
+using URIs, SHA, MD5, LoggingExtras, Figgy
+import HTTP2 as HTTP
 import FunctionWrappers: FunctionWrapper
 
 """
@@ -56,55 +57,55 @@ metrics(method::String, request_failed::Bool, request_retries::Int, request_dura
 const PREREQUEST_CALLBACK = Ref{FunctionWrapper{Nothing, Tuple{String}}}()
 const METRICS_CALLBACK = Ref{FunctionWrapper{Nothing, Tuple{String, Bool, Int64, Float64, Int64, Int64, Int64, Int64, Int64, Int64, Float64, Float64, Float64}}}()
 
-function cloudmetricslayer(handler)
-    function cloudmetrics(req; logexceptionalduration::Int=0, kw...)
-        failed = false
-        bytes_sent = bytes_received = connect_errors = io_errors = status_errors = timeout_errors = 0
-        connect_duration_ms = read_duration_ms = write_duration_ms = 0.0
-        start = time()
-        PREREQUEST_CALLBACK[](req.method)
-        try
-            resp = handler(req; kw...)
-            bytes_received = get(req.context, :nbytes, 0)
-            bytes_sent = get(req.context, :nbytes_written, 0)
-            read_duration_ms = get(req.context, :read_duration_ms, 0.0)
-            write_duration_ms = get(req.context, :write_duration_ms, 0.0)
-            return resp
-        catch
-            failed = true
-            rethrow()
-        finally
-            retries = get(req.context, :retryattempt, 0)
-            connect_errors = get(req.context, :connect_errors, 0)
-            io_errors = get(req.context, :io_errors, 0)
-            status_errors = get(req.context, :status_errors, 0)
-            timeout_errors = get(req.context, :timeout_errors, 0)
-            connect_duration_ms = get(req.context, :connect_duration_ms, 0.0)
-            dur = (time() - start) * 1000
-            if logexceptionalduration > 0 && div(dur, 1000) > logexceptionalduration
-                @warn "Exceptionally long cloud request:" total_duration_ms=dur method=req.method context=req.context
-            end
-            METRICS_CALLBACK[](req.method, failed, retries, dur, bytes_sent, bytes_received,
-                connect_errors, io_errors, status_errors, timeout_errors,
-                connect_duration_ms, read_duration_ms, write_duration_ms)
-        end
-    end
-end
+# function cloudmetricslayer(handler)
+#     function cloudmetrics(req; logexceptionalduration::Int=0, kw...)
+#         failed = false
+#         bytes_sent = bytes_received = connect_errors = io_errors = status_errors = timeout_errors = 0
+#         connect_duration_ms = read_duration_ms = write_duration_ms = 0.0
+#         start = time()
+#         PREREQUEST_CALLBACK[](req.method)
+#         try
+#             resp = handler(req; kw...)
+#             bytes_received = get(req.context, :nbytes, 0)
+#             bytes_sent = get(req.context, :nbytes_written, 0)
+#             read_duration_ms = get(req.context, :read_duration_ms, 0.0)
+#             write_duration_ms = get(req.context, :write_duration_ms, 0.0)
+#             return resp
+#         catch
+#             failed = true
+#             rethrow()
+#         finally
+#             retries = get(req.context, :retryattempt, 0)
+#             connect_errors = get(req.context, :connect_errors, 0)
+#             io_errors = get(req.context, :io_errors, 0)
+#             status_errors = get(req.context, :status_errors, 0)
+#             timeout_errors = get(req.context, :timeout_errors, 0)
+#             connect_duration_ms = get(req.context, :connect_duration_ms, 0.0)
+#             dur = (time() - start) * 1000
+#             if logexceptionalduration > 0 && div(dur, 1000) > logexceptionalduration
+#                 @warn "Exceptionally long cloud request:" total_duration_ms=dur method=req.method context=req.context
+#             end
+#             METRICS_CALLBACK[](req.method, failed, retries, dur, bytes_sent, bytes_received,
+#                 connect_errors, io_errors, status_errors, timeout_errors,
+#                 connect_duration_ms, read_duration_ms, write_duration_ms)
+#         end
+#     end
+# end
 
-# custom stream layer to be included right before actual request
-# is sent to ensure header timestamps are as correct as possible
-function cloudsignlayer(handler)
-    function cloudsign(stream; aws::Bool=false, awsv2::Bool=false, azure::Bool=false, kw...)
-        req = stream.message.request
-        if awsv2
-            awssignv2!(req; kw...)
-        elseif aws
-            awssign!(req; kw...)
-        end
-        azure && azuresign!(req; kw...)
-        return handler(stream; kw...)
-    end
-end
+# # custom stream layer to be included right before actual request
+# # is sent to ensure header timestamps are as correct as possible
+# function cloudsignlayer(handler)
+#     function cloudsign(stream; aws::Bool=false, awsv2::Bool=false, azure::Bool=false, kw...)
+#         req = stream.message.request
+#         if awsv2
+#             awssignv2!(req; kw...)
+#         elseif aws
+#             awssign!(req; kw...)
+#         end
+#         azure && azuresign!(req; kw...)
+#         return handler(stream; kw...)
+#     end
+# end
 
 """
     CloudBase.AWS
@@ -116,12 +117,22 @@ just like the `HTTP` equivalents and supports all the same keyword arguments.
 """
 module AWS
 
-using HTTP
-import ..cloudsignlayer, ..cloudmetricslayer, ..AWSCredentials, ..AbstractStore, ..AWS_DEFAULT_REGION
+using HTTP2
+import ..awssign!, ..awssignv2!, ..AWSCredentials, ..AbstractStore, ..AWS_DEFAULT_REGION
 
-awslayer(handler) = (req; kw...) -> handler(req; kw..., aws=true, readtimeout=300)
+function awslayer(; awsv2::Bool=false, kw...)
+    function awssignlayer(req, body)
+        if awsv2
+            awssignv2!(req; kw...)
+            return req.method != "GET"
+        else
+            awssign!(req; kw...)
+            return false
+        end
+    end
+end
 
-HTTP.@client (first=(awslayer, cloudmetricslayer), last=()) (first=(), last=(cloudsignlayer,))
+HTTP2.@client awslayer
 
 const DOCS = """
     AWS.get(url, headers, body; credentials, awsv2=false, kw...)
@@ -193,12 +204,17 @@ just like the `HTTP` equivalents and supports all the same keyword arguments.
 """
 module Azure
 
-using HTTP
-import ..cloudsignlayer, ..cloudmetricslayer, ..AzureCredentials, ..AbstractStore
+using HTTP2
+import ..azuresign!, ..AzureCredentials, ..AbstractStore
 
-azurelayer(handler) = (req; kw...) -> handler(req; azure=true, aws=false, awsv2=false, readtimeout=300, require_ssl_verification=req.url.host != "127.0.0.1", kw...)
+function azurelayer(; kw...)
+    function azuresignlayer(req, body)
+        azuresign!(req; kw...)
+        return false
+    end
+end
 
-HTTP.@client (first=(azurelayer, cloudmetricslayer), last=()) (first=(), last=(cloudsignlayer,))
+HTTP2.@client azurelayer
 
 const DOCS = """
     Azure.get(url, headers, body; credentials, kw...)

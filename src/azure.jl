@@ -159,20 +159,20 @@ function azuresign!(request::HTTP.Request; credentials=nothing, addMd5::Bool=tru
     # if credentials not provided, assume public access
     credentials === nothing && return
     # we're going to set Authorization header, so delete it if present
-    HTTP.removeheader(request, "Authorization")
+    HTTP.removeheader(request.headers, "Authorization")
     dt = Dates.now(Dates.UTC)
     requestDateTime = Dates.format(dt, RFC1123Format)
-    HTTP.setheader(request, "x-ms-date" => requestDateTime)
-    HTTP.setheader(request, "x-ms-version" => AZURE_API_VERSION)
+    HTTP.setheader(request.headers, "x-ms-date", requestDateTime)
+    HTTP.setheader(request.headers, "x-ms-version", AZURE_API_VERSION)
     # if addMd5 && request.body isa Union{Vector{UInt8}, String}
     #     hash = bytes2hex(md5(request.body))
     #     @show hash
-    #     HTTP.setheader(request, "Content-MD5" => bytes2hex(md5(request.body)))
+    #     HTTP.setheader(request.headers, "Content-MD5", bytes2hex(md5(request.body)))
     # end
     # determine credentials
     creds = getCredentials(credentials)
     if creds isa AccessToken
-        HTTP.setheader(request, "Authorization" => "Bearer $(creds.token)")
+        HTTP.setheader(request.headers, "Authorization", "Bearer $(creds.token)")
         return
     elseif creds isa SASToken
         url = request.url
@@ -218,7 +218,7 @@ function azuresign!(request::HTTP.Request; credentials=nothing, addMd5::Bool=tru
     signature = base64encode(hmac_sha256(base64decode(creds.key), stringToSign))
     # @show signature
     header = "SharedKey $(creds.account):$signature"
-    HTTP.setheader(request, "Authorization" => header)
+    HTTP.setheader(request.headers, "Authorization" => header)
     return
 end
 

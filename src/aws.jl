@@ -324,12 +324,12 @@ function awssign!(request::HTTP.Request; service=nothing, region=nothing, creden
     # determine credentials
     creds = getCredentials(credentials)
     # we're going to set Authorization header, so delete it if present
-    HTTP.removeheader(request, "Authorization")
+    HTTP.removeheader(request.headers, "Authorization")
     dt = x_amz_date === nothing ? Dates.now(Dates.UTC) : x_amz_date
     requestDateTime = Dates.format(dt, ISO8601)
-    HTTP.setheader(request, "x-amz-date" => requestDateTime)
+    HTTP.setheader(request.headers, "x-amz-date", requestDateTime)
     if !isempty(creds.session_token)
-        HTTP.setheader(request, "x-amz-security-token" => creds.session_token)
+        HTTP.setheader(request.headers, "x-amz-security-token", creds.session_token)
     end
 
     # https://docs.aws.amazon.com/general/latest/gr/sigv4_signing.html
@@ -344,12 +344,12 @@ function awssign!(request::HTTP.Request; service=nothing, region=nothing, creden
     # @show headers
     canonicalHeaders = join(map(x -> "$(x.first):$(x.second)", headers), "\n")
     signedHeaders = join(map(first, headers), ";")
-    @assert HTTP.isbytes(request.body) || request.body isa Union{Dict, NamedTuple}
-    body = HTTP.isbytes(request.body) ? request.body : HTTP.escapeuri(request.body)
+    @assert HTTP.isbytes(request.body) || request.body isa Union{Nothing, Dict, NamedTuple}
+    body = HTTP.isbytes(request.body) ? request.body : request.body === nothing ? UInt8[] : HTTP.escapeuri(request.body)
     #TODO: handle streaming request bodies?
     payloadHash = bytes2hex(sha256(body))
     if includeContentSha256
-        HTTP.setheader(request, "x-amz-content-sha256" => payloadHash)
+        HTTP.setheader(request.headers, "x-amz-content-sha256", payloadHash)
     end
 
     canonicalRequest = """$(request.method)
@@ -375,7 +375,7 @@ function awssign!(request::HTTP.Request; service=nothing, region=nothing, creden
     signature = bytes2hex(hmac_sha256(signingKey, stringToSign))
     # Task 4: Add the signature to the HTTP request
     header = "AWS4-HMAC-SHA256 Credential=$(creds.access_key_id)/$credentialScope, SignedHeaders=$signedHeaders, Signature=$signature"
-    HTTP.setheader(request, "Authorization" => header)
+    HTTP.setheader(request.headers, "Authorization", header)
     return
 end
 
