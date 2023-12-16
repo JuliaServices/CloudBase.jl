@@ -345,7 +345,7 @@ function awssign!(request::HTTP.Request; service=nothing, region=nothing, creden
     canonicalHeaders = join(map(x -> "$(x.first):$(x.second)", headers), "\n")
     signedHeaders = join(map(first, headers), ";")
     @assert HTTP.isbytes(request.body) || request.body isa Union{Nothing, Dict, NamedTuple}
-    body = HTTP.isbytes(request.body) ? request.body : request.body === nothing ? UInt8[] : HTTP.escapeuri(request.body)
+    body = HTTP.isbytes(request.body) ? request.body : request.body === nothing ? UInt8[] : URIs.escapeuri(request.body)
     #TODO: handle streaming request bodies?
     payloadHash = bytes2hex(sha256(body))
     if includeContentSha256
@@ -405,11 +405,11 @@ function awssignv2!(request::HTTP.Request; credentials::Union{Nothing, AWSCreden
     stringToSign = """$(request.method)
     $(lowercase(request.url.host))
     $(isempty(request.url.path) ? "/" : request.url.path)
-    $(HTTP.escapeuri(sorted))"""
+    $(URIs.escapeuri(sorted))"""
     signature = strip(base64encode(hmac_sha256(bytes(creds.secret_access_key), stringToSign)))
     if request.method == "GET"
         push!(sorted, "Signature" => signature)
-        request.target = request.url.path * "?" * HTTP.escapeuri(sorted)
+        request.target = request.url.path * "?" * URIs.escapeuri(sorted)
     else
         params["Signature"] = signature
         request.body = params
