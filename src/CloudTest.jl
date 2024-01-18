@@ -179,7 +179,7 @@ function run(; dir=nothing, bucket=nothing, public=false, startupDelay=0.25, deb
         return p, port
     end
     credentials = AWS.Credentials("minioadmin", "minioadmin")
-    bkt = AWS.Bucket(something(bucket, "jl-minio-$(abs(rand(Int16)))"); host="http://127.0.0.1:$port")
+    bkt = AWS.Bucket(something(bucket, "jl-minio-$(rand(UInt16))"); host="http://127.0.0.1:$port")
     resp = AWS.put(bkt.baseurl, []; service="s3", credentials, status_exception=false)
     while resp.status != 200
         if resp.status == 503
@@ -296,7 +296,7 @@ function run(; dir=nothing, container=nothing, public=false, startupDelay=3, deb
     end
     acct = "devstoreaccount1"
     protocol = use_ssl ? "https" : "http"
-    cont = Azure.Container(something(container, "jl-azurite-$(abs(rand(Int16)))"), acct; host="$protocol://127.0.0.1:$port")
+    cont = Azure.Container(something(container, "jl-azurite-$(rand(UInt16))"), acct; host="$protocol://127.0.0.1:$port")
     key = "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw=="
     credentials = Azure.Credentials(acct, key)
     headers = public ? ["x-ms-blob-public-access" => "container"] : []
