@@ -40,7 +40,7 @@ function AWSCredentials(profile::String="", load::Bool=true; expireThreshold=Dat
 end
 
 getCredentialsFile() = get(AWS_CONFIGS, "aws_shared_credentials_file", joinpath(homedir(), ".aws", "credentials"))
-getConfigFile() = get(AWS_CONFIGS, "aws_config_file", joinpath(homedir(), ".aws", "config")) 
+getConfigFile() = get(AWS_CONFIGS, "aws_config_file", joinpath(homedir(), ".aws", "config"))
 
 function awsLoadConfig!(profile::String="", expireThreshold=Dates.Minute(5))
     # on each fresh load, we want to clear out potentially stale credential fields
@@ -76,7 +76,7 @@ function awsLoadConfig!(profile::String="", expireThreshold=Dates.Minute(5))
     # together as one object in AWS_CONFIGS, so we know they all came "together"
     exp = get(AWS_CONFIGS, "expiration", nothing)
     expiration = exp === nothing ? exp : DateTime(rstrip(exp, 'Z'))
-    Figgy.load!(AWS_CONFIGS, "credentials" => 
+    Figgy.load!(AWS_CONFIGS, "credentials" =>
         AWSCredentials(profile,
             get(AWS_CONFIGS, "aws_access_key_id", ""),
             get(AWS_CONFIGS, "aws_secret_access_key", ""),
@@ -237,6 +237,7 @@ const AWS_DEFAULT_REGION = "us-east-1"
 # "s3.amazonaws.com"
 # "s3.us-west-2.amazonaws.com"
 # "bucket.s3.us-west-2.amazonaws.com"
+# "bucket.vpce-1a2b3c4d-5e6f.s3.us-east-1.vpce.amazonaws.com"
 function urlServiceRegion(host)
     spl = split(host, '.')
     if length(spl) == 5 && !all(isdigit, spl[2]) && !all(isdigit, spl[3])
@@ -247,6 +248,10 @@ function urlServiceRegion(host)
     elseif length(spl) == 3 && !all(isdigit, spl[1])
         # just got service
         return (spl[1], nothing)
+    elseif length(spl) == 7 && spl[5] == "vpce" && spl[6] == "amazonaws" && spl[7] == "com"
+        # See virtual private cloud https://docs.aws.amazon.com/AmazonS3/latest/userguide/privatelink-interface-endpoints.html
+        # got service & region
+        return (spl[3], spl[4])
     else
         # no service, no region
         return (nothing, nothing)
