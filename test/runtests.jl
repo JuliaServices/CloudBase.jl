@@ -226,3 +226,11 @@ end
         @test prereq_ref[] == 2
     end
 end
+
+@testset "urlServiceRegion" begin
+    @test CloudBase.urlServiceRegion("amazonaws.com") == (nothing, nothing)
+    @test CloudBase.urlServiceRegion("s3.amazonaws.com") == ("s3", nothing)
+    @test CloudBase.urlServiceRegion("s3.us-west-2.amazonaws.com") == ("s3", "us-west-2")
+    @test CloudBase.urlServiceRegion("bucket.s3.us-west-2.amazonaws.com") == ("s3", "us-west-2")
+    @test CloudBase.urlServiceRegion("bucket.vpce-1a2b3c4d-5e6f.s3.us-east-1.vpce.amazonaws.com") == ("s3", "us-east-1")
+end
