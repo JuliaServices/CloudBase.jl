@@ -234,3 +234,19 @@ end
     @test CloudBase.urlServiceRegion("bucket.s3.us-west-2.amazonaws.com") == ("s3", "us-west-2")
     @test CloudBase.urlServiceRegion("bucket.vpce-1a2b3c4d-5e6f.s3.us-east-1.vpce.amazonaws.com") == ("s3", "us-east-1")
 end
+
+@testset "redact credentials" begin
+    # Make sure we don't show secrets in the output
+    function test_output(creds)
+        io_buffer = IOBuffer()
+        Base.show(io_buffer, creds)
+        str = String(take!(io_buffer))
+        @test !occursin("0123456789abcdef", str)
+        @test occursin("***", str)
+        return nothing
+    end
+    test_output(CloudBase.AWSCredentials("0123456789abcdef", "0123456789abcdef", "0123456789abcdef"))
+    # same for Azure
+    test_output(Azure.Credentials(CloudBase.SharedKey("account_name", "0123456789abcdef")))
+    test_output(Azure.Credentials(CloudBase.generateAccountSASToken("account_name", "0123456789abcdef")))
+end
