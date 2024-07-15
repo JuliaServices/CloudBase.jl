@@ -10,6 +10,15 @@ mutable struct AWSCredentials <: CloudCredentials
     expireThreshold::Dates.Period
 end
 
+
+function Base.show(io::IO, creds::AWSCredentials)
+    print(io, "AWSCredentials(\
+        profile=$(creds.profile), access_key_id=****, \
+        secret_access_key=****, session_token=****, \
+        expiration=$(creds.expiration), expireThreshold=$(creds.expireThreshold))"
+    )
+end
+
 AWSCredentials(profile::String, access_key_id::String, secret_access_key::String, session_token::String, expiration, expireThreshold) =
     AWSCredentials(ReentrantLock(), profile, access_key_id, secret_access_key, session_token, expiration, expireThreshold)
 
