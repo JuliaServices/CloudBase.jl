@@ -241,12 +241,12 @@ end
         io_buffer = IOBuffer()
         Base.show(io_buffer, creds)
         str = String(take!(io_buffer))
-        @test !occursin("secret_pass", str)
+        @test !occursin("0123456789abcdef", str)
         @test occursin("***", str)
         return nothing
     end
-    test_output(CloudBase.AWSCredentials("secret_pass", "secret_pass", "secret_pass"))
+    test_output(CloudBase.AWSCredentials("0123456789abcdef", "0123456789abcdef", "0123456789abcdef"))
     # same for Azure
-    test_output(Azure.Credentials(CloudBase.SharedKey("account_name", "secret_pass")))
-    test_output(Azure.Credentials(CloudBase.generateAccountSASToken("account_name", "secret_pass")))
+    test_output(Azure.Credentials(CloudBase.SharedKey("account_name", "0123456789abcdef")))
+    test_output(Azure.Credentials(CloudBase.generateAccountSASToken("account_name", "0123456789abcdef")))
 end
