@@ -198,10 +198,10 @@ function loadRoleArn(roleArn, credFile, configFile)
     sprofile = get(AWS_CONFIGS, "source_profile", "")
     params["Action"] = "AssumeRole"
     params["Version"] = "2011-06-15"
-    if sprofile != ""
+    credentials = if sprofile != ""
         # source_profile is the config file profile we should use for creds to call STS
         Figgy.load!(AWS_CONFIGS, Figgy.IniFile(credFile, sprofile), Figgy.IniFile(configFile, sprofile))
-        credentials = AWSCredentials(
+        AWSCredentials(
             get(AWS_CONFIGS, "aws_access_key_id", ""),
             get(AWS_CONFIGS, "aws_secret_access_key", ""),
             get(AWS_CONFIGS, "aws_session_token", "")
@@ -209,7 +209,7 @@ function loadRoleArn(roleArn, credFile, configFile)
     elseif haskey(AWS_CONFIGS, "credential_source")
         # if credential_source is provided, we've already loaded source creds
         # above via environment variables, ecs, or ec2, so we should be ready to call STS
-        credentials = AWSCredentials(
+        AWSCredentials(
             get(AWS_CONFIGS, "aws_access_key_id", ""),
             get(AWS_CONFIGS, "aws_secret_access_key", ""),
             get(AWS_CONFIGS, "aws_session_token", "")
@@ -218,7 +218,7 @@ function loadRoleArn(roleArn, credFile, configFile)
         # load the web identity token to be passed to STS
         params["WebIdentityToken"] = read(AWS_CONFIGS["web_identity_token_file"])
         params["Action"] = "AssumeRoleWithWebIdentity"
-        credentials = nothing
+        nothing
     end
     if haskey(AWS_CONFIGS, "duration_seconds")
         dur = parse(Int, AWS_CONFIGS["duration_seconds"])
