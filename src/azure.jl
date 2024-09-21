@@ -196,19 +196,19 @@ function azuresign!(request::HTTP.Request; credentials=nothing, addMd5::Bool=tru
     canonicalQueryString = combineParams(pairs)
     path = isempty(request.url.path) ? "/" : request.url.path
     canonicalResource = "/$(creds.account)$(path)$canonicalQueryString"
-    len = HTTP.header(request, "Content-Length")
+    len = HTTP.header(request.headers, "Content-Length")
     stringToSign = """$(request.method)
-    $(HTTP.header(request, "Content-Encoding"))
-    $(HTTP.header(request, "Content-Language"))
+    $(HTTP.header(request.headers, "Content-Encoding"))
+    $(HTTP.header(request.headers, "Content-Language"))
     $(len == "0" ? "" : len)
-    $(HTTP.header(request, "Content-MD5"))
-    $(HTTP.header(request, "Content-Type"))
+    $(HTTP.header(request.headers, "Content-MD5"))
+    $(HTTP.header(request.headers, "Content-Type"))
     
-    $(HTTP.header(request, "If-Modified-Since"))
-    $(HTTP.header(request, "If-Match"))
-    $(HTTP.header(request, "If-None-Match"))
-    $(HTTP.header(request, "If-Unmodified-Since"))
-    $(HTTP.header(request, "Range"))
+    $(HTTP.header(request.headers, "If-Modified-Since"))
+    $(HTTP.header(request.headers, "If-Match"))
+    $(HTTP.header(request.headers, "If-None-Match"))
+    $(HTTP.header(request.headers, "If-Unmodified-Since"))
+    $(HTTP.header(request.headers, "Range"))
     $canonicalHeaders
     $canonicalResource"""
     # println("######################## string to sign")
