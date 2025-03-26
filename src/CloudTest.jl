@@ -79,6 +79,39 @@ function findOpenPorts(f, n)
     end
 end
 
+function _connect_with_timeout(host, port::Integer, timeout::Number)
+    s = TCPSocket()
+    t = Timer(_ -> close(s), timeout)
+    try
+        connect(s, host, port)
+    catch e
+        if isa(e, Base.IOError) && e.code == -125
+            error("Could not connect to $(host) on port $(port) in $(timeout) seconds")
+        else
+            rethrow(e)
+        end
+    finally
+        close(t)
+    end
+    @show
+    return s
+end
+
+function _wait_for_port(host, port::Integer, timeout::Number)
+    t0 = time()
+    while time() < t0 + timeout
+        try
+            s = _connect_with_timeout(host, port, timeout - (time() - t0))
+            close(s)
+            return nothing
+        catch e
+            sleep(0.1)
+            continue
+        end
+    end
+    error("Could not connect to $(host) on port $(port) in $(time() - t0) seconds")
+end
+
 # helper struct to treat tempfiles as IO objects
 struct TempFile <: IO
     path
@@ -100,7 +133,7 @@ Base.rm(x::TempFile) = rm(x.path)
 module Minio
 
 using minio_jll
-import ..Config, ..findOpenPorts, ...AWS, .._cmd
+import ..Config, ..findOpenPorts, ...AWS, .._cmd, .._wait_for_port
 
 """
     Minio.with(f; dir, bucket, public, startupDelay, debug)
@@ -175,7 +208,8 @@ function run(; dir=nothing, bucket=nothing, public=false, startupDelay=0.25, deb
         port, cport = ports
         cmd = _cmd(`$(minio_jll.minio()) server $dir --address $(bindIP):$(port) --console-address $(bindIP):$(cport)`)
         p = debug ? Base.run(cmd, devnull, stderr, stderr; wait=false) : Base.run(cmd; wait=false)
-        sleep(startupDelay) # sleep just a little for server startup
+        # Wait for the port to be open for up to 10 seconds
+        _wait_for_port("127.0.0.1", port, 10)
         return p, port
     end
     credentials = AWS.Credentials("minioadmin", "minioadmin")
@@ -206,7 +240,7 @@ end # module Minio
 module Azurite
 
 using NodeJS_16_jll, azurite_jll, Dates
-import ..Config, ..findOpenPorts, ...Azure, .._cmd
+import ..Config, ..findOpenPorts, ...Azure, .._cmd, .._wait_for_port
 
 """
     Azurite.with(f; dir, bucket, public, startupDelay, debug)
@@ -291,7 +325,8 @@ function run(; dir=nothing, container=nothing, public=false, startupDelay=3, deb
         skipApiVersionCheck && push!(cmd_args, "--skipApiVersionCheck")
         cmd = _cmd(`$(node()) $(azurite) $(cmd_args)`)
         p = debug ? Base.run(cmd, devnull, stderr, stderr; wait=false) : Base.run(cmd; wait=false)
-        sleep(startupDelay) # sleep just a little for server startup
+        # Wait for the port to be open for up to 10 seconds
+        _wait_for_port("127.0.0.1", port, 10)
         return p, port
     end
     acct = "devstoreaccount1"
