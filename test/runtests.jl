@@ -1,5 +1,6 @@
 using CloudBase, Test, CloudBase.CloudTest, JSON3, Dates, HTTP
 using CloudBase: AWS, Azure
+using Sockets, Random
 
 const x32bit = Sys.WORD_SIZE == 32
 
@@ -249,4 +250,22 @@ end
     # same for Azure
     test_output(Azure.Credentials(CloudBase.SharedKey("account_name", "0123456789abcdef")))
     test_output(Azure.Credentials(CloudBase.generateAccountSASToken("account_name", "0123456789abcdef")))
+end
+
+@testset "_wait_for_port" begin
+    port, socket = Sockets.listenany(IPv4(0), rand(RandomDevice(), 10000:50000))
+    try
+        _, duration = @timed CloudTest._wait_for_port("127.0.0.1", port, 1)
+        @test duration < 1
+    finally
+        close(socket)
+    end
+    refused_port = 54523
+    @test_throws ErrorException CloudTest._wait_for_port("127.0.0.1", refused_port, 0)
+
+    _, duration = @timed @test_throws ErrorException CloudTest._wait_for_port("127.0.0.1", refused_port, 1)
+    @test duration < 2
+    # Unreachable network
+    _, duration = @timed @test_throws Base.IOError CloudTest._connect_with_timeout("224.0.0.1", refused_port, 1)
+    @test duration < 2
 end
