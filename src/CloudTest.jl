@@ -81,7 +81,8 @@ end
 
 function _connect_with_timeout(host, port::Integer, timeout::Number)
     s = TCPSocket()
-    t = Timer(_ -> close(s), timeout)
+    # we wrap it in this way so that the current task does not become sticky
+    t = fetch(Threads.@spawn(Timer(_ -> close(s), timeout)))::Timer
     try
         connect(s, host, port)
     catch e
@@ -93,7 +94,6 @@ function _connect_with_timeout(host, port::Integer, timeout::Number)
     finally
         close(t)
     end
-    @show
     return s
 end
 
