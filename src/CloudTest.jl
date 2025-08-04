@@ -136,7 +136,7 @@ using minio_jll
 import ..Config, ..findOpenPorts, ...AWS, .._cmd, .._wait_for_port
 
 """
-    Minio.with(f; dir, bucket, public, startupDelay, debug)
+    Minio.with(f; dir, bucket, public, startupDelay, debug, waitForPortTimeout)
 
 Starts a minio server on a random open port, and passes a
 [`CloudTest.Config`](@ref) to `f`, which contains the credentials
@@ -198,7 +198,7 @@ publicPolicy(bucket) = """
 # use `with`, not `run`! if you `run`, it returns `conf, p`, where `p` is the server process
 # note that existing the Julia process *will not* stop the server process, which can easily
 # lead to "dangling" server processes. You can `kill(p)` to stop the server process manually
-function run(; dir=nothing, bucket=nothing, public=false, startupDelay=0.25, debug=false, bindIP="127.0.0.1")
+function run(; dir=nothing, bucket=nothing, public=false, startupDelay=0.25, debug=false, bindIP="127.0.0.1", waitForPortTimeout=30)
     if dir === nothing
         dir = mktempdir()
     elseif !isdir(dir)
@@ -208,8 +208,8 @@ function run(; dir=nothing, bucket=nothing, public=false, startupDelay=0.25, deb
         port, cport = ports
         cmd = _cmd(`$(minio_jll.minio()) server $dir --address $(bindIP):$(port) --console-address $(bindIP):$(cport)`)
         p = debug ? Base.run(cmd, devnull, stderr, stderr; wait=false) : Base.run(cmd; wait=false)
-        # Wait for the port to be open for up to 10 seconds
-        _wait_for_port("127.0.0.1", port, 10)
+        # Wait for the port to be open
+        _wait_for_port("127.0.0.1", port, waitForPortTimeout)
         return p, port
     end
     credentials = AWS.Credentials("minioadmin", "minioadmin")
@@ -243,7 +243,7 @@ using NodeJS_16_jll, azurite_jll, Dates
 import ..Config, ..findOpenPorts, ...Azure, .._cmd, .._wait_for_port
 
 """
-    Azurite.with(f; dir, bucket, public, startupDelay, debug)
+    Azurite.with(f; dir, bucket, public, startupDelay, debug, waitForPortTimeout)
 
 Starts an azurite server on a random open port, and passes a
 [`CloudTest.Config`](@ref) to `f`, which contains the credentials
@@ -307,7 +307,7 @@ publicPolicy() = """
 # use `with`, not `run`! if you `run`, it returns `conf, p`, where `p` is the server process
 # note that existing the Julia process *will not* stop the server process, which can easily
 # lead to "dangling" server processes. You can `kill(p)` to stop the server process manually
-function run(; dir=nothing, container=nothing, public=false, startupDelay=3, debug=false, use_ssl=true, skipApiVersionCheck=false)
+function run(; dir=nothing, container=nothing, public=false, startupDelay=0.5, debug=false, use_ssl=true, skipApiVersionCheck=false, waitForPortTimeout=30)
     if dir === nothing
         dir = mktempdir()
     elseif !isdir(dir)
@@ -325,8 +325,8 @@ function run(; dir=nothing, container=nothing, public=false, startupDelay=3, deb
         skipApiVersionCheck && push!(cmd_args, "--skipApiVersionCheck")
         cmd = _cmd(`$(node()) $(azurite) $(cmd_args)`)
         p = debug ? Base.run(cmd, devnull, stderr, stderr; wait=false) : Base.run(cmd; wait=false)
-        # Wait for the port to be open for up to 10 seconds
-        _wait_for_port("127.0.0.1", port, 10)
+        # Wait for the port to be open
+        _wait_for_port("127.0.0.1", port, waitForPortTimeout)
         return p, port
     end
     acct = "devstoreaccount1"
@@ -335,6 +335,8 @@ function run(; dir=nothing, container=nothing, public=false, startupDelay=3, deb
     key = "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw=="
     credentials = Azure.Credentials(acct, key)
     headers = public ? ["x-ms-blob-public-access" => "container"] : []
+    # Small delay to ensure the HTTP server is ready even though the TCP port is open
+    sleep(startupDelay)
     resp = Azure.put("$(cont.baseurl)?restype=container", headers; credentials, status_exception=false)
     if resp.status != 201
         @error resp
