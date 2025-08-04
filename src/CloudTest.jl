@@ -152,6 +152,7 @@ keyword arguments include:
     can be useful on slower systems to allow time for the server
     to fully startup
   * `debug`: whether to turn on minio debug logging, defaults to `false`
+  * `waitForPortTimeout`: Time to wait in seconds for the TCP port of Minio to be ready for connections
 """
 function with(f; dir=nothing, kw...)
     config, proc = run(; dir, kw...)
@@ -259,6 +260,7 @@ keyword arguments include:
     can be useful on slower systems to allow time for the server
     to fully startup
   * `debug`: whether to turn on minio debug logging, defaults to `false`
+  * `waitForPortTimeout`: Time to wait in seconds for the TCP port of Azurite to be ready for connections
 """
 function with(f; dir=nothing, debug::Bool=false, debugLog::Union{Nothing, Ref{String}}=nothing, kw...)
     config, proc = run(; dir, debug, kw...)

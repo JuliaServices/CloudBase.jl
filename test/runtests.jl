@@ -38,7 +38,7 @@ end
 
 @time @testset "AWS" begin
     config = Ref{Any}()
-    Minio.with(bindIP="127.0.0.1", startupDelay=3) do conf
+    Minio.with(bindIP="127.0.0.1", startupDelay=3, waitForPortTimeout=10) do conf
         config[] = conf
         credentials, bucket = conf
         csv = "a,b,c\n1,2,3\n4,5,$(rand())"
@@ -67,7 +67,7 @@ end
 if !x32bit
 @time @testset "Azure" begin
     config = Ref{Any}()
-    Azurite.with(startupDelay=3) do conf
+    Azurite.with(startupDelay=3, waitForPortTimeout=10) do conf
         config[] = conf
         credentials, container = conf
         csv = "a,b,c\n1,2,3\n4,5,$(rand())"
