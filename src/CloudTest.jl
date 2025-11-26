@@ -160,14 +160,11 @@ function with(f; dir=nothing, kw...)
         f(config)
     finally
         kill(proc)
-        i = 0
-        while !success(proc)
-            sleep(0.1)
-            i += 1
-            if i > 100
-                @warn "minio server process didn't exit as expected within 10 seconds"
-                break # give up waiting for process to finish
-            end
+        result = timedwait(10.0) do
+            success(proc)
+        end
+        if result == :timed_out
+            @warn "minio server process didn't exit as expected within 10 seconds"
         end
         dir === nothing && rm(config.dir; force=true, recursive=true)
     end
@@ -199,41 +196,64 @@ publicPolicy(bucket) = """
 # use `with`, not `run`! if you `run`, it returns `conf, p`, where `p` is the server process
 # note that existing the Julia process *will not* stop the server process, which can easily
 # lead to "dangling" server processes. You can `kill(p)` to stop the server process manually
-function run(; dir=nothing, bucket=nothing, public=false, startupDelay=0.25, debug=false, bindIP="127.0.0.1", waitForPortTimeout=30)
+function run(; dir=nothing, bucket=nothing, public=false, startupDelay=0.25, debug=false, bindIP="127.0.0.1", waitForPortTimeout=30, restartAttempts=3)
     if dir === nothing
         dir = mktempdir()
     elseif !isdir(dir)
         throw(ArgumentError("provided minio directory `$dir` doesn't exist; can't run minio server"))
     end
-    p, port = findOpenPorts(2) do ports
-        port, cport = ports
-        cmd = _cmd(`$(minio_jll.minio()) server $dir --address $(bindIP):$(port) --console-address $(bindIP):$(cport)`)
-        p = debug ? Base.run(cmd, devnull, stderr, stderr; wait=false) : Base.run(cmd; wait=false)
-        # Wait for the port to be open
-        _wait_for_port("127.0.0.1", port, waitForPortTimeout)
-        return p, port
-    end
-    credentials = AWS.Credentials("minioadmin", "minioadmin")
-    bkt = AWS.Bucket(something(bucket, "jl-minio-$(rand(UInt16))"); host="http://127.0.0.1:$port")
-    resp = AWS.put(bkt.baseurl, []; service="s3", credentials, status_exception=false)
-    while resp.status != 200
-        if resp.status == 503
-            # minio server is still starting up, so wait a bit and try again
-            sleep(startupDelay)
+
+    for attempt in 1:restartAttempts
+        local p, port
+        try
+            p, port = findOpenPorts(2) do ports
+                port, cport = ports
+                cmd = _cmd(`$(minio_jll.minio()) server $dir --address $(bindIP):$(port) --console-address $(bindIP):$(cport)`)
+                p = debug ? Base.run(cmd, devnull, stderr, stderr; wait=false) : Base.run(cmd; wait=false)
+                # Wait for the port to be open
+                _wait_for_port("127.0.0.1", port, waitForPortTimeout)
+                return p, port
+            end
+            credentials = AWS.Credentials("minioadmin", "minioadmin")
+            bkt = AWS.Bucket(something(bucket, "jl-minio-$(rand(UInt16))"); host="http://127.0.0.1:$port")
             resp = AWS.put(bkt.baseurl, []; service="s3", credentials, status_exception=false)
-        else
-            @error resp
-            throw(ArgumentError("unable to create minio bucket `$bkt`"))
+            while resp.status != 200
+                if resp.status == 503
+                    # minio server is still starting up, so wait a bit and try again
+                    sleep(startupDelay)
+                    resp = AWS.put(bkt.baseurl, []; service="s3", credentials, status_exception=false)
+                else
+                    @error resp
+                    error("unable to create minio bucket `$bkt`")
+                end
+            end
+            if public
+                resp = AWS.put(bkt.baseurl * "?policy", [], publicPolicy(bkt.name); service="s3", credentials, status_exception=false)
+                if resp.status != 204
+                    @error resp
+                    error("unable to set minio bucket `$bkt` to public")
+                end
+            end
+            return Config(credentials, bkt, port, dir, p), p
+        catch e
+            if attempt < restartAttempts
+                @warn "Minio attempt $attempt failed, restarting process..." exception=e
+                # Kill the process if it's still running
+                try
+                    kill(p)
+                    # Wait for process to terminate using timedwait
+                    timedwait(5.0) do
+                        success(p)
+                    end
+                catch
+                    # Process might already be dead
+                end
+            else
+                @error "Minio failed after $restartAttempts attempts"
+                rethrow(e)
+            end
         end
     end
-    if public
-        resp = AWS.put(bkt.baseurl * "?policy", [], publicPolicy(bkt.name); service="s3", credentials, status_exception=false)
-        if resp.status != 204
-            @error resp
-            throw(ArgumentError("unable to set minio bucket `$bkt` to public"))
-        end
-    end
-    return Config(credentials, bkt, port, dir, p), p
 end
 
 end # module Minio
@@ -278,14 +298,11 @@ function with(f; dir=nothing, debug::Bool=false, debugLog::Union{Nothing, Ref{St
         rethrow()
     finally
         kill(proc)
-        i = 0
-        while !success(proc)
-            sleep(0.1)
-            i += 1
-            if i > 100
-                @warn "azurite server process didn't exit as expected within 10 seconds"
-                break # give up waiting for process to finish
-            end
+        result = timedwait(10.0) do
+            success(proc)
+        end
+        if result == :timed_out
+            @warn "azurite server process didn't exit as expected within 10 seconds"
         end
         dir === nothing && rm(config.dir; force=true, recursive=true)
     end
@@ -309,49 +326,72 @@ publicPolicy() = """
 # use `with`, not `run`! if you `run`, it returns `conf, p`, where `p` is the server process
 # note that existing the Julia process *will not* stop the server process, which can easily
 # lead to "dangling" server processes. You can `kill(p)` to stop the server process manually
-function run(; dir=nothing, container=nothing, public=false, startupDelay=0.5, debug=false, use_ssl=true, skipApiVersionCheck=false, waitForPortTimeout=30)
+function run(; dir=nothing, container=nothing, public=false, startupDelay=0.5, debug=false, use_ssl=true, skipApiVersionCheck=false, waitForPortTimeout=30, restartAttempts=3)
     if dir === nothing
         dir = mktempdir()
     elseif !isdir(dir)
         throw(ArgumentError("provided azurite directory `$dir` doesn't exist; can't run azurite server"))
     end
-    p, port = findOpenPorts(3) do ports
-        port, qport, tport = ports
-        cmd_args = ["-l", dir, "-d", joinpath(dir, "debug.log"), "--blobPort", port, "--queuePort", qport, "--tablePort", tport, "--oauth", "basic"]
-        if use_ssl
-            cert = joinpath(@__DIR__, "test.cert")
-            key = joinpath(@__DIR__, "test.key")
-            push!(cmd_args, "--cert", cert, "--key", key)
+
+    for attempt in 1:restartAttempts
+        local p, port
+        try
+            p, port = findOpenPorts(3) do ports
+                port, qport, tport = ports
+                cmd_args = ["-l", dir, "-d", joinpath(dir, "debug.log"), "--blobPort", port, "--queuePort", qport, "--tablePort", tport, "--oauth", "basic"]
+                if use_ssl
+                    cert = joinpath(@__DIR__, "test.cert")
+                    key = joinpath(@__DIR__, "test.key")
+                    push!(cmd_args, "--cert", cert, "--key", key)
+                end
+                # Avoid checking whether the Azure API version is compatible with the client?
+                skipApiVersionCheck && push!(cmd_args, "--skipApiVersionCheck")
+                cmd = _cmd(`$(node()) $(azurite) $(cmd_args)`)
+                p = debug ? Base.run(cmd, devnull, stderr, stderr; wait=false) : Base.run(cmd; wait=false)
+                # Wait for the port to be open
+                _wait_for_port("127.0.0.1", port, waitForPortTimeout)
+                return p, port
+            end
+            acct = "devstoreaccount1"
+            protocol = use_ssl ? "https" : "http"
+            cont = Azure.Container(something(container, "jl-azurite-$(rand(UInt16))"), acct; host="$protocol://127.0.0.1:$port")
+            key = "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw=="
+            credentials = Azure.Credentials(acct, key)
+            headers = public ? ["x-ms-blob-public-access" => "container"] : []
+            # Small delay to ensure the HTTP server is ready even though the TCP port is open
+            sleep(startupDelay)
+            resp = Azure.put("$(cont.baseurl)?restype=container", headers; credentials, status_exception=false)
+            if resp.status != 201
+                @error resp
+                error("unable to create azurite container `$(cont.name)`")
+            end
+            if public
+                resp = Azure.put("$(cont.baseurl)?restype=container&comp=acl", ["x-ms-blob-public-access" => "container"], publicPolicy(); credentials, status_exception=false)
+                if resp.status != 200
+                    @error resp
+                    error("unable to set azurite container `$(cont.name)` to public")
+                end
+            end
+            return Config(credentials, cont, port, dir, p), p
+        catch e
+            if attempt < restartAttempts
+                @warn "Azurite attempt $attempt failed, restarting process..." exception=e
+                # Kill the process if it's still running
+                try
+                    kill(p)
+                    # Wait for process to terminate using timedwait
+                    timedwait(5.0) do
+                        success(p)
+                    end
+                catch
+                    # Process might already be dead
+                end
+            else
+                @error "Azurite failed after $max_retries attempts"
+                rethrow(e)
+            end
         end
-        # Avoid checking whether the Azure API version is compatible with the client?
-        skipApiVersionCheck && push!(cmd_args, "--skipApiVersionCheck")
-        cmd = _cmd(`$(node()) $(azurite) $(cmd_args)`)
-        p = debug ? Base.run(cmd, devnull, stderr, stderr; wait=false) : Base.run(cmd; wait=false)
-        # Wait for the port to be open
-        _wait_for_port("127.0.0.1", port, waitForPortTimeout)
-        return p, port
     end
-    acct = "devstoreaccount1"
-    protocol = use_ssl ? "https" : "http"
-    cont = Azure.Container(something(container, "jl-azurite-$(rand(UInt16))"), acct; host="$protocol://127.0.0.1:$port")
-    key = "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw=="
-    credentials = Azure.Credentials(acct, key)
-    headers = public ? ["x-ms-blob-public-access" => "container"] : []
-    # Small delay to ensure the HTTP server is ready even though the TCP port is open
-    sleep(startupDelay)
-    resp = Azure.put("$(cont.baseurl)?restype=container", headers; credentials, status_exception=false)
-    if resp.status != 201
-        @error resp
-        throw(ArgumentError("unable to create azurite container `$(cont.name)`"))
-    end
-    if public
-        resp = Azure.put("$(cont.baseurl)?restype=container&comp=acl", ["x-ms-blob-public-access" => "container"], publicPolicy(); credentials, status_exception=false)
-        if resp.status != 200
-            @error resp
-            throw(ArgumentError("unable to set azurite container `$(cont.name)` to public"))
-        end
-    end
-    return Config(credentials, cont, port, dir, p), p
 end
 
 end # module Azurite
