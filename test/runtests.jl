@@ -1,5 +1,5 @@
 using CloudBase, Test, CloudBase.CloudTest, JSON3, Dates, HTTP
-using CloudBase: AWS, Azure
+using CloudBase: AWS, Azure, GCP
 using Sockets, Random
 
 const x32bit = Sys.WORD_SIZE == 32
@@ -168,6 +168,32 @@ end
     end
 end
 
+@testset "GCP Access Token" begin
+    creds = GCP.Credentials("TEST_TOKEN")
+    req = HTTP.Request("GET", "/test"; url=HTTP.URI("https://storage.googleapis.com/test-bucket/test"))
+    CloudBase.gcpsign!(req; credentials=creds)
+    @test HTTP.header(req, "Authorization") == "Bearer TEST_TOKEN"
+
+    port, socket = Sockets.listenany(IPv4(0), rand(RandomDevice(), 10000:50000))
+    close(socket)
+    auth_headers = Channel{String}(2)
+    server = HTTP.serve!(ip"127.0.0.1", port) do request
+        put!(auth_headers, HTTP.header(request, "Authorization"))
+        return HTTP.Response(200, "ok")
+    end
+    try
+        resp = GCP.get("http://127.0.0.1:$port/test"; credentials=creds)
+        @test resp.status == 200
+        @test take!(auth_headers) == "Bearer TEST_TOKEN"
+
+        resp = GCP.get("http://127.0.0.1:$port/public")
+        @test resp.status == 200
+        @test take!(auth_headers) == ""
+    finally
+        close(server)
+    end
+end
+
 # test debug logs are printed for azurite
 @testset "Azurite debug" begin
     log = Ref{String}()
@@ -250,6 +276,7 @@ end
     # same for Azure
     test_output(Azure.Credentials(CloudBase.SharedKey("account_name", "0123456789abcdef")))
     test_output(Azure.Credentials(CloudBase.generateAccountSASToken("account_name", "0123456789abcdef")))
+    test_output(GCP.Credentials("0123456789abcdef"))
 end
 
 @testset "_wait_for_port" begin

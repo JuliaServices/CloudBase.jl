@@ -2,7 +2,7 @@
 
 GitHub Repo: [https://github.com/JuliaServices/CloudBase.jl](https://github.com/JuliaServices/CloudBase.jl)
 
-Welcome to CloudBase.jl! A simple, yet comprehensive foundation for interacting with common cloud providers in Julia (GCP, Azure, AWS).
+Welcome to CloudBase.jl! A simple, yet comprehensive foundation for interacting with common cloud providers in Julia.
 
 ## Installation
 
@@ -20,7 +20,8 @@ to load the package.
 ## Overview 
 
 The CloudBase.jl package provides a set of foundational functionality for interacting with the most common
-cloud providers (GCP, Azure, and AWS). It specifically aims to *do* the following:
+cloud providers. The AWS and Azure integrations are mature today, while GCP support is being added incrementally.
+It specifically aims to *do* the following:
   * Handle common credential scenarios, including the following in order of precedence:
     * Allow manually provided credentials by user
     * Loading credentials from cloud-idiomatic environment variables
@@ -37,7 +38,7 @@ The package specifically *does not* aim to do any of the following:
 The core of the package then, is in 3 *non*-exported modules (that you can import yourself if so desired):
   * `CloudBase.AWS`: provides `AWS.get`, `AWS.put`, `AWS.post`, `AWS.request` etc. as wrappers to corresponding `HTTP` methods
   * `CloudBase.Azure`: provides `Azure.get`, `Azure.put`, `Azure.post`, `Azure.request` etc. as wrappers to corresponding `HTTP` methods
-  * `CloudBase.GCP`: provides `GCP.get`, `GCP.put`, `GCP.post`, `GCP.request` etc. as wrappers to corresponding `HTTP` methods
+  * `CloudBase.GCP`: provides `GCP.get`, `GCP.put`, `GCP.post`, `GCP.request` etc. as wrappers to corresponding `HTTP` methods; `main` currently supports explicit bearer-token credentials and will grow broader ADC-backed flows over time
 
 That means *using* this packages behavior is basically like dropping in a cloud-specific module call in place
 of where you would have been calling HTTP.jl, like:

@@ -7,7 +7,12 @@
 [![version](https://juliahub.com/docs/CloudBase/version.svg)](https://juliahub.com/ui/Packages/CloudBase/HHBkp)
 [![pkgeval](https://juliahub.com/docs/CloudBase/pkgeval.svg)](https://juliahub.com/ui/Packages/CloudBase/HHBkp)
 
-*A simple, yet comprehensive foundation for interacting with common cloud providers in Julia (GCP, Azure, AWS)*
+*A simple, yet comprehensive foundation for interacting with common cloud providers in Julia.*
+
+Current provider status on `main`:
+- AWS: mature
+- Azure: mature
+- GCP: request client scaffolded with explicit bearer-token credentials; broader ADC and Cloud Storage support are in progress
 
 ## Installation
 

@@ -43,11 +43,12 @@ function canconnect(ip, port, timeout=0.01)
     end
 end
 
-# expiration check for both AWS.Credentials and Azure.Credentials
+# expiration check for credential types that support refreshing
 expired(x) = x.expiration !== nothing && Dates.now(Dates.UTC) > (x.expiration - x.expireThreshold)
 
 include("aws.jl")
 include("azure.jl")
+include("gcp.jl")
 
 
 prerequest(method::String) = nothing
@@ -94,7 +95,7 @@ end
 # custom stream layer to be included right before actual request
 # is sent to ensure header timestamps are as correct as possible
 function cloudsignlayer(handler)
-    function cloudsign(stream; aws::Bool=false, awsv2::Bool=false, azure::Bool=false, kw...)
+    function cloudsign(stream; aws::Bool=false, awsv2::Bool=false, azure::Bool=false, gcp::Bool=false, kw...)
         req = stream.message.request
         if awsv2
             awssignv2!(req; kw...)
@@ -102,6 +103,7 @@ function cloudsignlayer(handler)
             awssign!(req; kw...)
         end
         azure && azuresign!(req; kw...)
+        gcp && gcpsign!(req; kw...)
         return handler(stream; kw...)
     end
 end
@@ -254,6 +256,58 @@ struct Container <: AbstractStore
 end
 
 end # module Azure
+
+"""
+    CloudBase.GCP
+
+Submodule that contains a custom HTTP.jl client for performing Google Cloud requests.
+For authenticated requests, an explicit [`GCP.Credentials`](@ref) object can be passed
+as the `credentials` keyword argument. Otherwise, the request methods operate just like
+the `HTTP` equivalents and support all the same keyword arguments.
+"""
+module GCP
+
+using HTTP
+import ..cloudsignlayer, ..cloudmetricslayer, ..GCPCredentials
+
+gcplayer(handler) = (req; kw...) -> handler(req; gcp=true, aws=false, awsv2=false, azure=false, readtimeout=300, kw...)
+
+HTTP.@client (first=(gcplayer, cloudmetricslayer), last=()) (first=(), last=(cloudsignlayer,))
+
+const DOCS = """
+    GCP.get(url, headers, body; credentials, kw...)
+    GCP.put(url, headers, body; kw...)
+    GCP.post(url, headers, body; kw...)
+    GCP.delete(url, headers, body; kw...)
+    GCP.head(url, headers; kw...)
+    GCP.patch(url, headers, body; kw...)
+    GCP.request(method, url, headers, body; kw...)
+    GCP.open(method, url, headers[, body]; kw...)
+
+HTTP.jl client methods that additionally *each* take a `credentials` keyword argument,
+which should be a `GCP.Credentials` object. This initial implementation supports
+explicit bearer-token credentials; additional ADC-backed credential flows can be layered
+into the same type without changing the request API.
+
+Otherwise, these methods operate exactly like their `HTTP.method` counterparts, accepting
+all the same positional and keyword arguments.
+"""
+for method in (:get, :put, :post, :delete, :head, :patch, :request, :open)
+    @eval begin
+        @doc $DOCS GCP.$method(args...; kw...)
+    end
+end
+
+"""
+    CloudBase.GCP.Credentials(access_token[, expiration]; expireThreshold=Dates.Minute(5))
+
+Credentials object used for authenticating Google Cloud requests with an explicit bearer token.
+If `expiration` is provided, later credential implementations can use the same shape for refresh
+logic while preserving the request API.
+"""
+const Credentials = GCPCredentials
+
+end # module GCP
 
 include("CloudTest.jl")
 
