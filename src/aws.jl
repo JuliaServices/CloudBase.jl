@@ -339,11 +339,6 @@ function awssign!(request::HTTP.Request; service=nothing, region=nothing, creden
     # @show canonicalURI
     canonicalQueryString = join((string(uriencode(k), "=", uriencode(v)) for (k, v) in sort!(queryparampairs(request.url); by=x->"$(x[1])$(x[2])")), "&")
     # @show request.url, queryparampairs(request.url), canonicalQueryString
-    headers = sort!(map(canonicalHeader, request.headers); by=x->x.first)
-    deduplicateHeaders!(headers)
-    # @show headers
-    canonicalHeaders = join(map(x -> "$(x.first):$(x.second)", headers), "\n")
-    signedHeaders = join(map(first, headers), ";")
     @assert HTTP.isbytes(request.body) || request.body isa Union{Dict, NamedTuple}
     body = HTTP.isbytes(request.body) ? request.body : HTTP.escapeuri(request.body)
     #TODO: handle streaming request bodies?
@@ -351,6 +346,11 @@ function awssign!(request::HTTP.Request; service=nothing, region=nothing, creden
     if includeContentSha256
         HTTP.setheader(request, "x-amz-content-sha256" => payloadHash)
     end
+    headers = sort!(map(canonicalHeader, request.headers); by=x->x.first)
+    deduplicateHeaders!(headers)
+    # @show headers
+    canonicalHeaders = join(map(x -> "$(x.first):$(x.second)", headers), "\n")
+    signedHeaders = join(map(first, headers), ";")
 
     canonicalRequest = """$(request.method)
     $canonicalURI

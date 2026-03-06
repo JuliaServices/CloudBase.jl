@@ -1,9 +1,10 @@
 module CloudBase
 
 export CloudTest
+export CloudPool
 
 using Dates, Base64, Random, Sockets
-using HTTP, URIs, SHA, MD5, LoggingExtras, Figgy, JSON, OpenSSL
+using HTTP, URIs, SHA, MD5, LoggingExtras, Figgy, JSON, OpenSSL, Reseau
 import FunctionWrappers: FunctionWrapper
 
 """
@@ -49,6 +50,7 @@ expired(x) = x.expiration !== nothing && Dates.now(Dates.UTC) > (x.expiration - 
 include("aws.jl")
 include("azure.jl")
 include("gcp.jl")
+include("reseau_http.jl")
 
 
 prerequest(method::String) = nothing
@@ -107,7 +109,6 @@ function cloudsignlayer(handler)
         return handler(stream; kw...)
     end
 end
-
 """
     CloudBase.AWS
 
@@ -119,11 +120,55 @@ just like the `HTTP` equivalents and supports all the same keyword arguments.
 module AWS
 
 using HTTP
-import ..cloudsignlayer, ..cloudmetricslayer, ..AWSCredentials, ..AbstractStore, ..AWS_DEFAULT_REGION
+import ..CloudPool, ..cloudrequest, ..AWSCredentials, ..AbstractStore, ..AWS_DEFAULT_REGION
 
-awslayer(handler) = (req; kw...) -> handler(req; kw..., aws=true, readtimeout=300)
+_default_readtimeout_kw(kw) = haskey(kw, :readtimeout) ? (; ) : (; readtimeout=300)
+_is_headers_arg(x) = x isa AbstractDict || x isa AbstractVector
 
-HTTP.@client (first=(awslayer, cloudmetricslayer), last=()) (first=(), last=(cloudsignlayer,))
+function _split_headers_body(args, headers, body)
+    if isempty(args)
+        return headers, body
+    elseif length(args) == 1
+        arg = args[1]
+        if body !== nothing
+            return arg, body
+        elseif _is_headers_arg(arg)
+            return arg, nothing
+        else
+            return headers, arg
+        end
+    elseif length(args) == 2
+        return args[1], args[2]
+    end
+    throw(ArgumentError("expected at most two positional arguments after URL: headers and body"))
+end
+
+function request(method::AbstractString, url, headers=HTTP.Headers(), body=nothing; kw...)
+    defaults = _default_readtimeout_kw(kw)
+    return cloudrequest(method, url, headers, body; defaults..., kw..., aws=true)
+end
+
+get(url; headers=HTTP.Headers(), kw...) = request("GET", url, headers, nothing; kw...)
+get(url, headers; kw...) = request("GET", url, headers, nothing; kw...)
+head(url; headers=HTTP.Headers(), kw...) = request("HEAD", url, headers, nothing; kw...)
+head(url, headers; kw...) = request("HEAD", url, headers, nothing; kw...)
+function post(url, args...; headers=HTTP.Headers(), body=nothing, kw...)
+    headers, body = _split_headers_body(args, headers, body)
+    return request("POST", url, headers, body; kw...)
+end
+function put(url, args...; headers=HTTP.Headers(), body=nothing, kw...)
+    headers, body = _split_headers_body(args, headers, body)
+    return request("PUT", url, headers, body; kw...)
+end
+function patch(url, args...; headers=HTTP.Headers(), body=nothing, kw...)
+    headers, body = _split_headers_body(args, headers, body)
+    return request("PATCH", url, headers, body; kw...)
+end
+function delete(url, args...; headers=HTTP.Headers(), body=nothing, kw...)
+    headers, body = _split_headers_body(args, headers, body)
+    return request("DELETE", url, headers, body; kw...)
+end
+open(args...; kw...) = throw(ArgumentError("AWS.open is not supported by the Reseau-backed transport"))
 
 const DOCS = """
     AWS.get(url, headers, body; credentials, awsv2=false, kw...)
@@ -196,11 +241,61 @@ just like the `HTTP` equivalents and supports all the same keyword arguments.
 module Azure
 
 using HTTP
-import ..cloudsignlayer, ..cloudmetricslayer, ..AzureCredentials, ..AbstractStore
+import ..CloudPool, ..cloudrequest, ..AzureCredentials, ..AbstractStore
 
-azurelayer(handler) = (req; kw...) -> handler(req; azure=true, aws=false, awsv2=false, readtimeout=300, require_ssl_verification=req.url.host != "127.0.0.1", kw...)
+_default_readtimeout_kw(kw) = haskey(kw, :readtimeout) ? (; ) : (; readtimeout=300)
+_is_headers_arg(x) = x isa AbstractDict || x isa AbstractVector
 
-HTTP.@client (first=(azurelayer, cloudmetricslayer), last=()) (first=(), last=(cloudsignlayer,))
+function _split_headers_body(args, headers, body)
+    if isempty(args)
+        return headers, body
+    elseif length(args) == 1
+        arg = args[1]
+        if body !== nothing
+            return arg, body
+        elseif _is_headers_arg(arg)
+            return arg, nothing
+        else
+            return headers, arg
+        end
+    elseif length(args) == 2
+        return args[1], args[2]
+    end
+    throw(ArgumentError("expected at most two positional arguments after URL: headers and body"))
+end
+
+function _default_require_ssl_verification(url, kw)
+    haskey(kw, :require_ssl_verification) && return kw[:require_ssl_verification]
+    return String(HTTP.URI(url).host) != "127.0.0.1"
+end
+
+function request(method::AbstractString, url, headers=HTTP.Headers(), body=nothing; kw...)
+    readtimeout_kw = _default_readtimeout_kw(kw)
+    ssl_kw = haskey(kw, :require_ssl_verification) ? (; ) : (; require_ssl_verification=_default_require_ssl_verification(url, kw))
+    return cloudrequest(method, url, headers, body; readtimeout_kw..., ssl_kw..., kw..., azure=true, aws=false, awsv2=false)
+end
+
+get(url; headers=HTTP.Headers(), kw...) = request("GET", url, headers, nothing; kw...)
+get(url, headers; kw...) = request("GET", url, headers, nothing; kw...)
+head(url; headers=HTTP.Headers(), kw...) = request("HEAD", url, headers, nothing; kw...)
+head(url, headers; kw...) = request("HEAD", url, headers, nothing; kw...)
+function post(url, args...; headers=HTTP.Headers(), body=nothing, kw...)
+    headers, body = _split_headers_body(args, headers, body)
+    return request("POST", url, headers, body; kw...)
+end
+function put(url, args...; headers=HTTP.Headers(), body=nothing, kw...)
+    headers, body = _split_headers_body(args, headers, body)
+    return request("PUT", url, headers, body; kw...)
+end
+function patch(url, args...; headers=HTTP.Headers(), body=nothing, kw...)
+    headers, body = _split_headers_body(args, headers, body)
+    return request("PATCH", url, headers, body; kw...)
+end
+function delete(url, args...; headers=HTTP.Headers(), body=nothing, kw...)
+    headers, body = _split_headers_body(args, headers, body)
+    return request("DELETE", url, headers, body; kw...)
+end
+open(args...; kw...) = throw(ArgumentError("Azure.open is not supported by the Reseau-backed transport"))
 
 const DOCS = """
     Azure.get(url, headers, body; credentials, kw...)
@@ -268,11 +363,55 @@ the `HTTP` equivalents and support all the same keyword arguments.
 module GCP
 
 using HTTP
-import ..cloudsignlayer, ..cloudmetricslayer, ..GCPCredentials, ..AbstractStore
+import ..CloudPool, ..cloudrequest, ..GCPCredentials, ..AbstractStore
 
-gcplayer(handler) = (req; kw...) -> handler(req; gcp=true, aws=false, awsv2=false, azure=false, readtimeout=300, kw...)
+_default_readtimeout_kw(kw) = haskey(kw, :readtimeout) ? (; ) : (; readtimeout=300)
+_is_headers_arg(x) = x isa AbstractDict || x isa AbstractVector
 
-HTTP.@client (first=(gcplayer, cloudmetricslayer), last=()) (first=(), last=(cloudsignlayer,))
+function _split_headers_body(args, headers, body)
+    if isempty(args)
+        return headers, body
+    elseif length(args) == 1
+        arg = args[1]
+        if body !== nothing
+            return arg, body
+        elseif _is_headers_arg(arg)
+            return arg, nothing
+        else
+            return headers, arg
+        end
+    elseif length(args) == 2
+        return args[1], args[2]
+    end
+    throw(ArgumentError("expected at most two positional arguments after URL: headers and body"))
+end
+
+function request(method::AbstractString, url, headers=HTTP.Headers(), body=nothing; kw...)
+    defaults = _default_readtimeout_kw(kw)
+    return cloudrequest(method, url, headers, body; defaults..., kw..., gcp=true, aws=false, awsv2=false, azure=false)
+end
+
+get(url; headers=HTTP.Headers(), kw...) = request("GET", url, headers, nothing; kw...)
+get(url, headers; kw...) = request("GET", url, headers, nothing; kw...)
+head(url; headers=HTTP.Headers(), kw...) = request("HEAD", url, headers, nothing; kw...)
+head(url, headers; kw...) = request("HEAD", url, headers, nothing; kw...)
+function post(url, args...; headers=HTTP.Headers(), body=nothing, kw...)
+    headers, body = _split_headers_body(args, headers, body)
+    return request("POST", url, headers, body; kw...)
+end
+function put(url, args...; headers=HTTP.Headers(), body=nothing, kw...)
+    headers, body = _split_headers_body(args, headers, body)
+    return request("PUT", url, headers, body; kw...)
+end
+function patch(url, args...; headers=HTTP.Headers(), body=nothing, kw...)
+    headers, body = _split_headers_body(args, headers, body)
+    return request("PATCH", url, headers, body; kw...)
+end
+function delete(url, args...; headers=HTTP.Headers(), body=nothing, kw...)
+    headers, body = _split_headers_body(args, headers, body)
+    return request("DELETE", url, headers, body; kw...)
+end
+open(args...; kw...) = throw(ArgumentError("GCP.open is not supported by the Reseau-backed transport"))
 
 const DOCS = """
     GCP.get(url, headers, body; credentials, kw...)
