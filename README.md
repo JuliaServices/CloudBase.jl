@@ -25,7 +25,7 @@ The package is registered in the [`General`](https://github.com/JuliaRegistries/
 
 ## Project Status
 
-The package is tested against Julia `1.6`, current stable release, and nightly on Linux.
+The package is tested against Julia `1.9`, current stable release, and nightly on Linux.
 Default CI stays fully local/mock-based. There is also an opt-in live GCP smoke test in `test/runtests.jl` that exercises one real object write/read/delete round-trip against an existing bucket.
 
 Live test environment:

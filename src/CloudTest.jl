@@ -483,8 +483,12 @@ const RESP = """
 # utility for mocking an AzureVM
 function with(f)
     server = HTTP.serve!(50398) do req
-        if req.method == "GET" && req.target == "/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https%3A%2F%2Fstorage.azure.com%2F"
+        if req.method == "GET" && startswith(req.target, "/metadata/identity/oauth2/token?")
+            uri = HTTP.URI(req.target)
+            params = Dict(URIs.queryparampairs(uri))
             @assert HTTP.header(req, "Metadata") == "true"
+            @assert get(params, "api-version", "") == "2018-02-01"
+            @assert get(params, "resource", "") == "https://storage.azure.com/"
             return HTTP.Response(200, RESP)
         else
             return HTTP.Response(404)

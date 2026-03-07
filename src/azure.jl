@@ -123,7 +123,8 @@ function Figgy.load(x::AzureVMCredentialsSource)
         "client_id" => get(AZURE_CONFIGS, "client_id", ""),
         "mi_res_id" => get(AZURE_CONFIGS, "mi_res_id", ""),
     )
-    resp = HTTP.get("$host/metadata/identity/oauth2/token", ["Metadata" => "true"]; query=filter(x->x.second != "", query))
+    filtered_query = Pair{String, String}[k => v for (k, v) in query if v != ""]
+    resp = HTTP.get("$host/metadata/identity/oauth2/token", ["Metadata" => "true"]; query=filtered_query)
     return Figgy.kmap(Figgy.JsonObject(resp.body),
         "access_token" => "access_token",
         "expires_on" => "expiration",
