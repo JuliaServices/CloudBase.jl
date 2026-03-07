@@ -53,3 +53,28 @@ function get_file(url, creds)
     return AWS.get(url; service="S3", region="us-west-1", access_key_id=creds.id, secret_access_key=creds.secret)
 end
 ```
+
+## Testing
+
+The default test suite is intentionally mock-heavy and secretless. For GCP specifically, service-account,
+authorized-user, external-account, metadata-server, and Cloud Storage HMAC flows are all covered by local
+HTTP mocks in `test/runtests.jl`.
+
+There is also an opt-in live GCP smoke test that performs a real object write/read/delete round-trip against
+an existing bucket when `CLOUDBASE_RUN_GCP_LIVE_TESTS=1` is set. The required environment variables are:
+
+```bash
+export CLOUDBASE_RUN_GCP_LIVE_TESTS=1
+export CLOUDBASE_GCP_LIVE_BUCKET=<existing-bucket>
+# choose one credential path:
+export CLOUDBASE_GCP_LIVE_ACCESS_TOKEN=<token>
+# or:
+export CLOUDBASE_GCP_LIVE_CREDENTIALS_FILE=/path/to/credentials.json
+# or:
+export GOOGLE_APPLICATION_CREDENTIALS=/path/to/credentials.json
+# or:
+export CLOUDBASE_GCP_LIVE_HMAC_ACCESS_ID=<id>
+export CLOUDBASE_GCP_LIVE_HMAC_SECRET=<secret>
+```
+
+`CLOUDBASE_GCP_LIVE_QUOTA_PROJECT` can also be provided when the request path needs a user-project header.

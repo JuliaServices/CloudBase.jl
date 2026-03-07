@@ -476,6 +476,12 @@ function impersonateServiceAccount(source::ExternalAccountSource, access_token::
     return String(jsonfield(payload, "accessToken")), parseRFC3339(jsonfield(payload, "expireTime"))
 end
 
+"""
+    CloudBase.reloadGCECredentials!([root]; service_account="default", expireThreshold=Dates.Minute(5), scopes=[...])
+
+Load fresh Google metadata-server credentials and store them in the internal GCP config cache.
+This is primarily useful for tests and explicit refresh scenarios.
+"""
 function reloadGCECredentials!(root=nothing; service_account::String=GCP_DEFAULT_SERVICE_ACCOUNT, expireThreshold=Dates.Minute(5), scopes::Vector{String}=copy(GCP_DEFAULT_SCOPES))
     credentials = loadMetadataCredentials(; root=something(root, GCP_DEFAULT_METADATA_ROOT), service_account, expireThreshold, scopes)
     Figgy.load!(GCP_CONFIGS, "credentials" => credentials)

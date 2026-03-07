@@ -26,6 +26,19 @@ The package is registered in the [`General`](https://github.com/JuliaRegistries/
 ## Project Status
 
 The package is tested against Julia `1.6`, current stable release, and nightly on Linux.
+Default CI stays fully local/mock-based. There is also an opt-in live GCP smoke test in `test/runtests.jl` that exercises one real object write/read/delete round-trip against an existing bucket.
+
+Live test environment:
+- `CLOUDBASE_RUN_GCP_LIVE_TESTS=1`
+- `CLOUDBASE_GCP_LIVE_BUCKET=<existing-bucket>`
+- One credential option:
+  - `CLOUDBASE_GCP_LIVE_ACCESS_TOKEN=<token>`
+  - `CLOUDBASE_GCP_LIVE_CREDENTIALS_FILE=<adc-or-service-account-file>`
+  - `GOOGLE_APPLICATION_CREDENTIALS=<adc-or-service-account-file>`
+  - `CLOUDBASE_GCP_LIVE_HMAC_ACCESS_ID=<id>` and `CLOUDBASE_GCP_LIVE_HMAC_SECRET=<secret>`
+- Optional: `CLOUDBASE_GCP_LIVE_QUOTA_PROJECT=<project>`
+
+The live credential needs object create/get/delete access on the target bucket.
 
 ## Contributing and Questions
 
