@@ -7,7 +7,12 @@
 [![version](https://juliahub.com/docs/CloudBase/version.svg)](https://juliahub.com/ui/Packages/CloudBase/HHBkp)
 [![pkgeval](https://juliahub.com/docs/CloudBase/pkgeval.svg)](https://juliahub.com/ui/Packages/CloudBase/HHBkp)
 
-*A simple, yet comprehensive foundation for interacting with common cloud providers in Julia (GCP, Azure, AWS)*
+*A simple, yet comprehensive foundation for interacting with common cloud providers in Julia.*
+
+Current provider status on `main`:
+- AWS: mature
+- Azure: mature
+- GCP: request client supports explicit bearer tokens, `service_account`, `authorized_user`, and file/url-based `external_account` credentials, plus metadata-server credentials and Cloud Storage XML HMAC interop via `AWS4-HMAC-SHA256`
 
 ## Installation
 
@@ -20,7 +25,20 @@ The package is registered in the [`General`](https://github.com/JuliaRegistries/
 
 ## Project Status
 
-The package is tested against Julia `1.6`, current stable release, and nightly on Linux.
+The package is tested against Julia `1.9`, current stable release, and nightly on Linux.
+Default CI stays fully local/mock-based. There is also an opt-in live GCP smoke test in `test/runtests.jl` that exercises one real object write/read/delete round-trip against an existing bucket.
+
+Live test environment:
+- `CLOUDBASE_RUN_GCP_LIVE_TESTS=1`
+- `CLOUDBASE_GCP_LIVE_BUCKET=<existing-bucket>`
+- One credential option:
+  - `CLOUDBASE_GCP_LIVE_ACCESS_TOKEN=<token>`
+  - `CLOUDBASE_GCP_LIVE_CREDENTIALS_FILE=<adc-or-service-account-file>`
+  - `GOOGLE_APPLICATION_CREDENTIALS=<adc-or-service-account-file>`
+  - `CLOUDBASE_GCP_LIVE_HMAC_ACCESS_ID=<id>` and `CLOUDBASE_GCP_LIVE_HMAC_SECRET=<secret>`
+- Optional: `CLOUDBASE_GCP_LIVE_QUOTA_PROJECT=<project>`
+
+The live credential needs object create/get/delete access on the target bucket.
 
 ## Contributing and Questions
 
