@@ -57,7 +57,7 @@
   - `2026-03-07`: `julia --project=. --startup-file=no -e 'using Pkg; Pkg.resolve()'` updated the manifest for direct `JSON`/`OpenSSL` deps.
   - `2026-03-07`: `julia --project=. --startup-file=no -e 'using Pkg; Pkg.test()'` passed with new service-account, metadata, JWT-shape, RS256 verification, and refresh-concurrency coverage.
 
-### [ ] ITEM-003 (P1) Implement full ADC file support for `authorized_user` and `external_account`
+### [x] ITEM-003 (P1) Implement full ADC file support for `authorized_user` and `external_account`
 - Description: To make `GCP.Credentials()` feel like real ADC instead of a partial implementation, support the remaining common credential file types used by local development and keyless CI.
 - Desired outcome: Well-known/local ADC files can back `authorized_user` refresh-token auth and `external_account` / workload-identity-federation token exchange, with clear errors for unsupported or malformed configs.
 - Affected files: `src/gcp.jl`, `src/CloudTest.jl`, `test/runtests.jl`, `README.md`, `docs/src/index.md`
@@ -72,11 +72,14 @@
 - Assumptions:
   - We can model external-account coverage with local mock HTTP endpoints instead of requiring real cloud identity providers in default tests.
   - Error messages should prefer clarity over trying to silently degrade unsupported configs.
+  - This item will prioritize well-known `authorized_user` ADC files plus file/url-sourced `external_account` configs with STS and optional service-account impersonation, which covers the main local-dev and keyless-CI paths.
 - Risks:
   - External-account configs have the most protocol surface area and are the likeliest source of subtle bugs.
 - Completion criteria:
   - `GCP.Credentials()` supports the major ADC file types documented by Google.
   - Tests cover success and failure cases for authorized-user and external-account configs.
+- Verification evidence:
+  - `2026-03-07`: `julia --project=. --startup-file=no -e 'using Pkg; Pkg.test()'` passed with coverage for well-known `authorized_user` ADC files, file-sourced `external_account` configs with STS + impersonation, and url-sourced `external_account` configs.
 
 ### [ ] ITEM-004 (P1) Add Cloud Storage bucket primitives and HMAC/XML request signing
 - Description: CloudStore will eventually need first-class GCS support. Add the CloudBase pieces that make that practical: a GCP bucket abstraction and explicit Cloud Storage XML HMAC signing/interoperability support.

@@ -1,6 +1,6 @@
 module CloudTest
 
-export TempFile, Minio, Azurite, ECS, EC2, AzureVM, GCPTokenServer, GCPMetadata
+export TempFile, Minio, Azurite, ECS, EC2, AzureVM, GCPTokenServer, GCPMetadata, GCPSTS, GCPImpersonation
 
 import ..CloudCredentials, ..AWS, ..Azure, ..AbstractStore
 
@@ -559,5 +559,65 @@ function with(f; port=50400, response::AbstractString=RESP, request_ref=nothing,
 end
 
 end # module GCPMetadata
+
+module GCPSTS
+
+using HTTP
+
+const RESP = """
+{
+  "access_token": "GCP_STS_TOKEN",
+  "issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
+  "token_type": "Bearer",
+  "expires_in": 3599
+}"""
+
+function with(f; port=50401, response::AbstractString=RESP, request_ref=nothing, request_count=Ref(0))
+    server = HTTP.serve!(port) do req
+        if req.method == "POST" && req.target == "/v1/token"
+            request_count[] += 1
+            request_ref === nothing || (request_ref[] = (method=req.method, target=req.target, headers=copy(req.headers), body=String(req.body)))
+            return HTTP.Response(200, response)
+        else
+            return HTTP.Response(404)
+        end
+    end
+    try
+        f(request_count)
+    finally
+        close(server)
+    end
+end
+
+end # module GCPSTS
+
+module GCPImpersonation
+
+using HTTP
+
+const RESP = """
+{
+  "accessToken": "GCP_IMPERSONATED_TOKEN",
+  "expireTime": "2026-03-07T01:00:00Z"
+}"""
+
+function with(f; port=50402, response::AbstractString=RESP, request_ref=nothing, request_count=Ref(0))
+    server = HTTP.serve!(port) do req
+        if req.method == "POST" && occursin(":generateAccessToken", req.target)
+            request_count[] += 1
+            request_ref === nothing || (request_ref[] = (method=req.method, target=req.target, headers=copy(req.headers), body=String(req.body)))
+            return HTTP.Response(200, response)
+        else
+            return HTTP.Response(404)
+        end
+    end
+    try
+        f(request_count)
+    finally
+        close(server)
+    end
+end
+
+end # module GCPImpersonation
 
 end # module CloudTest

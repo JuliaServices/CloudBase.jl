@@ -286,8 +286,8 @@ const DOCS = """
 
 HTTP.jl client methods that additionally *each* take a `credentials` keyword argument,
 which should be a `GCP.Credentials` object. GCP credentials support explicit bearer
-tokens, `service_account` application credentials, and metadata-server tokens on
-Google-managed compute.
+tokens, `service_account`, `authorized_user`, and file/url-based `external_account`
+application credentials, as well as metadata-server tokens on Google-managed compute.
 
 Otherwise, these methods operate exactly like their `HTTP.method` counterparts, accepting
 all the same positional and keyword arguments.
@@ -304,7 +304,8 @@ end
 
 Credentials object used for authenticating Google Cloud requests. An explicit bearer token
 can be provided directly, or `GCP.Credentials()` can load a `service_account` application
-credentials file or Google metadata-server credentials.
+credentials file, a well-known/local ADC file with `authorized_user` or `external_account`
+credentials, or Google metadata-server credentials.
 """
 const Credentials = GCPCredentials
 
