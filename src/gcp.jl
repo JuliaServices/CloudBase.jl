@@ -14,11 +14,11 @@ const GCP_METADATA_TOKEN_PATH = "/computeMetadata/v1/instance/service-accounts/{
 
 abstract type GCPAuth end
 
-struct AccessToken <: GCPAuth
+struct GCPAccessToken <: GCPAuth
     token::String
 end
 
-Base.show(io::IO, ::AccessToken) = print(io, "AccessToken(****)")
+Base.show(io::IO, ::GCPAccessToken) = print(io, "GCPAccessToken(****)")
 
 struct HMACKey <: GCPAuth
     access_id::String
@@ -142,7 +142,7 @@ function Base.show(io::IO, creds::GCPCredentials)
 end
 
 function GCPCredentials(access_token::String, expiration=nothing; expireThreshold=Dates.Minute(5), scopes::Vector{String}=copy(GCP_DEFAULT_SCOPES), quota_project_id::String="")
-    auth = AccessToken(access_token)
+    auth = GCPAccessToken(access_token)
     return GCPCredentials(StaticAuthSource(auth), auth, expiration, expireThreshold, copy(scopes), quota_project_id)
 end
 
@@ -153,7 +153,7 @@ end
 
 function GCPCredentials(source::GCPSource; expireThreshold=Dates.Minute(5), scopes::Vector{String}=copy(GCP_DEFAULT_SCOPES), quota_project_id::String="")
     source isa StaticAuthSource && throw(ArgumentError("refreshable GCP sources must not be wrapped in `StaticAuthSource`"))
-    return GCPCredentials(source, AccessToken(""), Dates.now(Dates.UTC) - Dates.Second(1), expireThreshold, copy(scopes), quota_project_id)
+    return GCPCredentials(source, GCPAccessToken(""), Dates.now(Dates.UTC) - Dates.Second(1), expireThreshold, copy(scopes), quota_project_id)
 end
 
 function GCPCredentials(; application_credentials_file::Union{Nothing, String}=nothing, expireThreshold=Dates.Minute(5), scopes::Vector{String}=copy(GCP_DEFAULT_SCOPES))
@@ -311,7 +311,7 @@ function getCredentials(x::GCPCredentials)
     end
 end
 
-shouldRefresh(x::GCPCredentials) = !(x.source isa StaticAuthSource) && (x.auth isa AccessToken && (isempty(x.auth.token) || expired(x)))
+shouldRefresh(x::GCPCredentials) = !(x.source isa StaticAuthSource) && (x.auth isa GCPAccessToken && (isempty(x.auth.token) || expired(x)))
 
 refresh!(x::GCPCredentials) = refresh!(x, x.source)
 refresh!(x::GCPCredentials, ::StaticAuthSource) = x
@@ -323,7 +323,7 @@ function refresh!(x::GCPCredentials, source::ServiceAccountSource)
     ))
     resp = HTTP.post(source.token_uri, ["Content-Type" => "application/x-www-form-urlencoded"], body)
     payload = JSON.parse(resp.body)
-    x.auth = AccessToken(String(jsonfield(payload, "access_token")))
+    x.auth = GCPAccessToken(String(jsonfield(payload, "access_token")))
     x.expiration = tokenExpiration(jsonfield(payload, "expires_in"))
     return x
 end
@@ -337,7 +337,7 @@ function refresh!(x::GCPCredentials, source::AuthorizedUserSource)
     ))
     resp = HTTP.post(source.token_uri, ["Content-Type" => "application/x-www-form-urlencoded"], body)
     payload = JSON.parse(resp.body)
-    x.auth = AccessToken(String(jsonfield(payload, "access_token")))
+    x.auth = GCPAccessToken(String(jsonfield(payload, "access_token")))
     x.expiration = tokenExpiration(jsonfield(payload, "expires_in"))
     return x
 end
@@ -350,7 +350,7 @@ function refresh!(x::GCPCredentials, source::ExternalAccountSource)
     if !isempty(source.service_account_impersonation_url)
         access_token, expiration = impersonateServiceAccount(source, access_token, x.scopes)
     end
-    x.auth = AccessToken(access_token)
+    x.auth = GCPAccessToken(access_token)
     x.expiration = expiration
     if isempty(x.quota_project_id)
         x.quota_project_id = source.workforce_pool_user_project
@@ -361,7 +361,7 @@ end
 function refresh!(x::GCPCredentials, source::MetadataSource)
     resp = HTTP.get(metadataTokenURL(source), ["Metadata-Flavor" => "Google"])
     payload = JSON.parse(resp.body)
-    x.auth = AccessToken(String(jsonfield(payload, "access_token")))
+    x.auth = GCPAccessToken(String(jsonfield(payload, "access_token")))
     x.expiration = tokenExpiration(jsonfield(payload, "expires_in"))
     return x
 end
@@ -491,7 +491,7 @@ end
 function gcpsign!(request::HTTP.Request; credentials::Union{Nothing, GCPCredentials}=nothing, kw...)
     credentials === nothing && return
     auth = getCredentials(credentials)
-    if auth isa AccessToken
+    if auth isa GCPAccessToken
         HTTP.removeheader(request, "Authorization")
         HTTP.setheader(request, "Authorization" => "Bearer $(auth.token)")
         if !isempty(credentials.quota_project_id)

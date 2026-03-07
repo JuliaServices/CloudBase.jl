@@ -259,7 +259,7 @@ end
             ENV[CloudBase.GCP_APPLICATION_CREDENTIALS_ENV] = path
             try
                 creds = GCP.Credentials()
-                @test creds.auth isa CloudBase.AccessToken
+                @test creds.auth isa CloudBase.GCPAccessToken
                 @test creds.auth.token == "GCP_SERVICE_ACCOUNT_TOKEN"
                 @test request_count[] == 1
 
@@ -320,7 +320,7 @@ end
         ENV["HOME"] = temp_home
         try
             creds = GCP.Credentials()
-            @test creds.auth isa CloudBase.AccessToken
+            @test creds.auth isa CloudBase.GCPAccessToken
             @test creds.auth.token == "GCP_AUTHORIZED_USER_TOKEN"
             @test request_count[] == 1
 
@@ -369,7 +369,7 @@ end
                 ))
 
                 creds = GCP.Credentials(; application_credentials_file=creds_file)
-                @test creds.auth isa CloudBase.AccessToken
+                @test creds.auth isa CloudBase.GCPAccessToken
                 @test creds.auth.token == "GCP_IMPERSONATED_TOKEN"
                 @test sts_request_count[] == 1
                 @test impersonation_request_count[] == 1
@@ -424,7 +424,7 @@ end
                 )))
                 close(io)
                 creds = GCP.Credentials(; application_credentials_file=path)
-                @test creds.auth isa CloudBase.AccessToken
+                @test creds.auth isa CloudBase.GCPAccessToken
                 @test creds.auth.token == "GCP_URL_STS_TOKEN"
                 @test sts_request_count[] == 1
                 @test headerdict(source_request_ref[].headers)["Metadata"] == "True"
@@ -481,7 +481,7 @@ end
     request_ref = Ref{Any}()
     GCPMetadata.with(; request_ref=request_ref) do request_count
         creds = CloudBase.reloadGCECredentials!("http://127.0.0.1:50400")
-        @test creds.auth isa CloudBase.AccessToken
+        @test creds.auth isa CloudBase.GCPAccessToken
         @test creds.auth.token == "GCP_METADATA_TOKEN"
         @test request_count[] == 1
         @test request_ref[].target == "/computeMetadata/v1/instance/service-accounts/default/token"
