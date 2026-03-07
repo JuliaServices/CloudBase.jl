@@ -20,6 +20,18 @@ end
 
 Base.show(io::IO, ::AccessToken) = print(io, "AccessToken(****)")
 
+struct HMACKey <: GCPAuth
+    access_id::String
+    secret::String
+    region::String
+    service::String
+end
+
+function Base.show(io::IO, key::HMACKey)
+    print(io, "HMACKey(")
+    print(io, "access_id=****,secret=****,region=", key.region, ",service=", key.service, ")")
+end
+
 abstract type GCPSource end
 
 struct StaticAuthSource <: GCPSource
@@ -132,6 +144,11 @@ end
 function GCPCredentials(access_token::String, expiration=nothing; expireThreshold=Dates.Minute(5), scopes::Vector{String}=copy(GCP_DEFAULT_SCOPES), quota_project_id::String="")
     auth = AccessToken(access_token)
     return GCPCredentials(StaticAuthSource(auth), auth, expiration, expireThreshold, copy(scopes), quota_project_id)
+end
+
+function GCPCredentials(access_id::String, secret::String; region::String=AWS_DEFAULT_REGION, service::String="s3", expireThreshold=Dates.Minute(5), scopes::Vector{String}=copy(GCP_DEFAULT_SCOPES), quota_project_id::String="")
+    auth = HMACKey(access_id, secret, region, service)
+    return GCPCredentials(StaticAuthSource(auth), auth, nothing, expireThreshold, copy(scopes), quota_project_id)
 end
 
 function GCPCredentials(source::GCPSource; expireThreshold=Dates.Minute(5), scopes::Vector{String}=copy(GCP_DEFAULT_SCOPES), quota_project_id::String="")
@@ -468,11 +485,19 @@ end
 function gcpsign!(request::HTTP.Request; credentials::Union{Nothing, GCPCredentials}=nothing, kw...)
     credentials === nothing && return
     auth = getCredentials(credentials)
-    auth isa AccessToken || throw(ArgumentError("unsupported GCP credentials type `$(typeof(auth))`"))
-    HTTP.removeheader(request, "Authorization")
-    HTTP.setheader(request, "Authorization" => "Bearer $(auth.token)")
-    if !isempty(credentials.quota_project_id)
-        HTTP.setheader(request, "x-goog-user-project" => credentials.quota_project_id)
+    if auth isa AccessToken
+        HTTP.removeheader(request, "Authorization")
+        HTTP.setheader(request, "Authorization" => "Bearer $(auth.token)")
+        if !isempty(credentials.quota_project_id)
+            HTTP.setheader(request, "x-goog-user-project" => credentials.quota_project_id)
+        end
+    elseif auth isa HMACKey
+        if !isempty(credentials.quota_project_id)
+            HTTP.setheader(request, "x-amz-project-id" => credentials.quota_project_id)
+        end
+        awssign!(request; service=auth.service, region=auth.region, credentials=AWSCredentials(auth.access_id, auth.secret), kw...)
+    else
+        throw(ArgumentError("unsupported GCP credentials type `$(typeof(auth))`"))
     end
     return
 end

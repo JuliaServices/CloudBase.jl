@@ -268,7 +268,7 @@ the `HTTP` equivalents and support all the same keyword arguments.
 module GCP
 
 using HTTP
-import ..cloudsignlayer, ..cloudmetricslayer, ..GCPCredentials
+import ..cloudsignlayer, ..cloudmetricslayer, ..GCPCredentials, ..AbstractStore
 
 gcplayer(handler) = (req; kw...) -> handler(req; gcp=true, aws=false, awsv2=false, azure=false, readtimeout=300, kw...)
 
@@ -287,7 +287,8 @@ const DOCS = """
 HTTP.jl client methods that additionally *each* take a `credentials` keyword argument,
 which should be a `GCP.Credentials` object. GCP credentials support explicit bearer
 tokens, `service_account`, `authorized_user`, and file/url-based `external_account`
-application credentials, as well as metadata-server tokens on Google-managed compute.
+application credentials, metadata-server tokens on Google-managed compute, and
+explicit Cloud Storage XML HMAC interop credentials.
 
 Otherwise, these methods operate exactly like their `HTTP.method` counterparts, accepting
 all the same positional and keyword arguments.
@@ -300,14 +301,34 @@ end
 
 """
     CloudBase.GCP.Credentials(access_token[, expiration]; expireThreshold=Dates.Minute(5))
+    CloudBase.GCP.Credentials(access_id, secret; region="us-east-1", service="s3", expireThreshold=Dates.Minute(5))
     CloudBase.GCP.Credentials(; application_credentials_file=nothing, scopes=[...], expireThreshold=Dates.Minute(5))
 
 Credentials object used for authenticating Google Cloud requests. An explicit bearer token
 can be provided directly, or `GCP.Credentials()` can load a `service_account` application
 credentials file, a well-known/local ADC file with `authorized_user` or `external_account`
-credentials, or Google metadata-server credentials.
+credentials, or Google metadata-server credentials. A 2-string constructor is also
+available for Cloud Storage XML HMAC interoperability using the documented
+`AWS4-HMAC-SHA256` simple-migration path.
 """
 const Credentials = GCPCredentials
+
+"""
+    CloudBase.GCP.Bucket(name)
+
+Object representation of a Google Cloud Storage bucket using the XML API path-style
+endpoint layout. This is intended to mirror the existing provider store types and
+unblock downstream storage integrations.
+"""
+struct Bucket <: AbstractStore
+    name::String
+    baseurl::String
+
+    function Bucket(name::String; host::Union{Nothing, String}=nothing)
+        baseurl = host === nothing ? "https://storage.googleapis.com/$name/" : "$host/$name/"
+        return new(name, baseurl)
+    end
+end
 
 end # module GCP
 
