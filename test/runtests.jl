@@ -28,6 +28,8 @@ function verifyRS256(private_key::String, message::String, signature::Vector{UIn
     end
 end
 
+headerdict(headers) = Dict(String(k) => String(v) for (k, v) in headers)
+
 @testset "AWSSigV4" begin
     file = abspath(joinpath(dirname(pathof(CloudBase)), "../test/resources/awsSig4Cases.json"))
     cases = JSON3.read(read(file))
@@ -266,6 +268,150 @@ end
             finally
                 delete!(ENV, CloudBase.GCP_APPLICATION_CREDENTIALS_ENV)
             end
+        end
+    end
+end
+
+@testset "GCP Authorized User" begin
+    request_ref = Ref{Any}()
+    response = JSON.json(Dict(
+        "access_token" => "GCP_AUTHORIZED_USER_TOKEN",
+        "expires_in" => 3599,
+        "token_type" => "Bearer",
+    ))
+    GCPTokenServer.with(; port=50403, response, request_ref=request_ref) do request_count
+        temp_home = mktempdir()
+        adc_dir = joinpath(temp_home, ".config", "gcloud")
+        mkpath(adc_dir)
+        JSON.json(joinpath(adc_dir, "application_default_credentials.json"), Dict(
+            "type" => "authorized_user",
+            "client_id" => "authorized-client-id",
+            "client_secret" => "authorized-client-secret",
+            "refresh_token" => "authorized-refresh-token",
+            "quota_project_id" => "billing-project",
+            "token_uri" => "http://127.0.0.1:50403/token",
+        ))
+        old_home = get(ENV, "HOME", nothing)
+        old_gac = get(ENV, CloudBase.GCP_APPLICATION_CREDENTIALS_ENV, nothing)
+        delete!(ENV, CloudBase.GCP_APPLICATION_CREDENTIALS_ENV)
+        ENV["HOME"] = temp_home
+        try
+            creds = GCP.Credentials()
+            @test creds.auth isa CloudBase.AccessToken
+            @test creds.auth.token == "GCP_AUTHORIZED_USER_TOKEN"
+            @test request_count[] == 1
+
+            request = request_ref[]
+            params = Dict(HTTP.URIs.queryparampairs(HTTP.URI("http://127.0.0.1/?$(request.body)")))
+            @test params["grant_type"] == CloudBase.GCP_REFRESH_TOKEN_GRANT_TYPE
+            @test params["client_id"] == "authorized-client-id"
+            @test params["client_secret"] == "authorized-client-secret"
+            @test params["refresh_token"] == "authorized-refresh-token"
+
+            req = HTTP.Request("GET", "/test"; url=HTTP.URI("https://storage.googleapis.com/test-bucket/test"))
+            CloudBase.gcpsign!(req; credentials=creds)
+            @test HTTP.header(req, "Authorization") == "Bearer GCP_AUTHORIZED_USER_TOKEN"
+            @test HTTP.header(req, "x-goog-user-project") == "billing-project"
+        finally
+            old_home === nothing ? delete!(ENV, "HOME") : (ENV["HOME"] = old_home)
+            old_gac === nothing || (ENV[CloudBase.GCP_APPLICATION_CREDENTIALS_ENV] = old_gac)
+        end
+    end
+end
+
+@testset "GCP External Account File Source" begin
+    sts_request_ref = Ref{Any}()
+    impersonation_request_ref = Ref{Any}()
+    GCPSTS.with(; request_ref=sts_request_ref) do sts_request_count
+        GCPImpersonation.with(; request_ref=impersonation_request_ref) do impersonation_request_count
+            mktempdir() do dir
+                subject_token_file = joinpath(dir, "subject-token.json")
+                JSON.json(subject_token_file, Dict("id_token" => "FILE_SUBJECT_TOKEN"))
+                creds_file = joinpath(dir, "external-account.json")
+                JSON.json(creds_file, Dict(
+                    "type" => "external_account",
+                    "audience" => "//iam.googleapis.com/projects/123/locations/global/workloadIdentityPools/pool/providers/provider",
+                    "subject_token_type" => "urn:ietf:params:oauth:token-type:jwt",
+                    "token_url" => "http://127.0.0.1:50401/v1/token",
+                    "service_account_impersonation_url" => "http://127.0.0.1:50402/v1/projects/-/serviceAccounts/test@example.com:generateAccessToken",
+                    "service_account_impersonation" => Dict("token_lifetime_seconds" => 1800),
+                    "workforce_pool_user_project" => "external-billing-project",
+                    "credential_source" => Dict(
+                        "file" => subject_token_file,
+                        "format" => Dict(
+                            "type" => "json",
+                            "subject_token_field_name" => "id_token",
+                        ),
+                    ),
+                ))
+
+                creds = GCP.Credentials(; application_credentials_file=creds_file)
+                @test creds.auth isa CloudBase.AccessToken
+                @test creds.auth.token == "GCP_IMPERSONATED_TOKEN"
+                @test sts_request_count[] == 1
+                @test impersonation_request_count[] == 1
+
+                sts_payload = JSON.parse(sts_request_ref[].body)
+                @test sts_payload["grantType"] == CloudBase.GCP_TOKEN_EXCHANGE_GRANT_TYPE
+                @test sts_payload["requestedTokenType"] == CloudBase.GCP_REQUESTED_TOKEN_TYPE
+                @test sts_payload["subjectToken"] == "FILE_SUBJECT_TOKEN"
+                @test sts_payload["subjectTokenType"] == "urn:ietf:params:oauth:token-type:jwt"
+                @test sts_payload["scope"] == join(CloudBase.GCP_IMPERSONATION_SCOPES, ' ')
+
+                impersonation_headers = headerdict(impersonation_request_ref[].headers)
+                @test impersonation_headers["Authorization"] == "Bearer GCP_STS_TOKEN"
+                impersonation_payload = JSON.parse(impersonation_request_ref[].body)
+                @test impersonation_payload["scope"] == CloudBase.GCP_DEFAULT_SCOPES
+                @test impersonation_payload["lifetime"] == "1800s"
+
+                req = HTTP.Request("GET", "/test"; url=HTTP.URI("https://storage.googleapis.com/test-bucket/test"))
+                CloudBase.gcpsign!(req; credentials=creds)
+                @test HTTP.header(req, "x-goog-user-project") == "external-billing-project"
+            end
+        end
+    end
+end
+
+@testset "GCP External Account URL Source" begin
+    sts_request_ref = Ref{Any}()
+    source_request_ref = Ref{Any}()
+    GCPSTS.with(; port=50404, response=JSON.json(Dict(
+        "access_token" => "GCP_URL_STS_TOKEN",
+        "issued_token_type" => CloudBase.GCP_REQUESTED_TOKEN_TYPE,
+        "token_type" => "Bearer",
+        "expires_in" => 3599,
+    )), request_ref=sts_request_ref) do sts_request_count
+        port, socket = Sockets.listenany(IPv4(0), rand(RandomDevice(), 10000:50000))
+        close(socket)
+        server = HTTP.serve!(ip"127.0.0.1", port) do request
+            source_request_ref[] = (method=request.method, target=request.target, headers=copy(request.headers), body=String(request.body))
+            return HTTP.Response(200, "URL_SUBJECT_TOKEN")
+        end
+        try
+            mktemp() do path, io
+                write(io, JSON.json(Dict(
+                    "type" => "external_account",
+                    "audience" => "//iam.googleapis.com/projects/123/locations/global/workloadIdentityPools/pool/providers/provider",
+                    "subject_token_type" => "urn:ietf:params:oauth:token-type:jwt",
+                    "token_url" => "http://127.0.0.1:50404/v1/token",
+                    "credential_source" => Dict(
+                        "url" => "http://127.0.0.1:$port/subject-token",
+                        "headers" => Dict("Metadata" => "True"),
+                    ),
+                )))
+                close(io)
+                creds = GCP.Credentials(; application_credentials_file=path)
+                @test creds.auth isa CloudBase.AccessToken
+                @test creds.auth.token == "GCP_URL_STS_TOKEN"
+                @test sts_request_count[] == 1
+                @test headerdict(source_request_ref[].headers)["Metadata"] == "True"
+
+                sts_payload = JSON.parse(sts_request_ref[].body)
+                @test sts_payload["subjectToken"] == "URL_SUBJECT_TOKEN"
+                @test sts_payload["scope"] == join(CloudBase.GCP_DEFAULT_SCOPES, ' ')
+            end
+        finally
+            close(server)
         end
     end
 end

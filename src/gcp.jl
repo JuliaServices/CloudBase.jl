@@ -1,8 +1,13 @@
 const GCP_CONFIGS = Figgy.Store()
 const GCP_DEFAULT_SCOPES = ["https://www.googleapis.com/auth/cloud-platform"]
+const GCP_IMPERSONATION_SCOPES = ["https://www.googleapis.com/auth/cloud-platform"]
 const GCP_APPLICATION_CREDENTIALS_ENV = "GOOGLE_APPLICATION_CREDENTIALS"
 const GCP_JWT_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:jwt-bearer"
+const GCP_REFRESH_TOKEN_GRANT_TYPE = "refresh_token"
+const GCP_TOKEN_EXCHANGE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:token-exchange"
+const GCP_REQUESTED_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:access_token"
 const GCP_DEFAULT_TOKEN_URI = "https://oauth2.googleapis.com/token"
+const GCP_DEFAULT_STS_TOKEN_URI = "https://sts.googleapis.com/v1/token"
 const GCP_DEFAULT_METADATA_ROOT = "http://metadata.google.internal"
 const GCP_DEFAULT_SERVICE_ACCOUNT = "default"
 const GCP_METADATA_TOKEN_PATH = "/computeMetadata/v1/instance/service-accounts/{service_account}/token"
@@ -38,6 +43,60 @@ function Base.show(io::IO, source::ServiceAccountSource)
     print(io, "private_key_id=", isempty(source.private_key_id) ? "" : "****", ")")
 end
 
+struct AuthorizedUserSource <: GCPSource
+    client_id::String
+    client_secret::String
+    refresh_token::String
+    token_uri::String
+end
+
+function Base.show(io::IO, source::AuthorizedUserSource)
+    print(io, "AuthorizedUserSource(")
+    print(io, "client_id=****,client_secret=****,refresh_token=****,token_uri=", source.token_uri, ")")
+end
+
+abstract type ExternalCredentialSource end
+
+struct ExternalFileSource <: ExternalCredentialSource
+    file::String
+    format_type::String
+    subject_token_field_name::String
+end
+
+Base.show(io::IO, source::ExternalFileSource) = print(io, "ExternalFileSource($(source.file), $(source.format_type))")
+
+struct ExternalURLSource <: ExternalCredentialSource
+    url::String
+    headers::Vector{Pair{String, String}}
+    format_type::String
+    subject_token_field_name::String
+end
+
+Base.show(io::IO, source::ExternalURLSource) = print(io, "ExternalURLSource($(source.url), $(source.format_type))")
+
+struct ExternalAccountSource <: GCPSource
+    audience::String
+    subject_token_type::String
+    token_uri::String
+    service_account_impersonation_url::String
+    service_account_token_lifetime_seconds::Int
+    workforce_pool_user_project::String
+    credential_source::ExternalCredentialSource
+end
+
+function Base.show(io::IO, source::ExternalAccountSource)
+    print(io, "ExternalAccountSource(")
+    print(io, "audience=", source.audience, ",")
+    print(io, "subject_token_type=", source.subject_token_type, ",")
+    print(io, "token_uri=", source.token_uri, ",")
+    print(io, "service_account_impersonation_url=", source.service_account_impersonation_url, ",")
+    print(io, "service_account_token_lifetime_seconds=", source.service_account_token_lifetime_seconds, ",")
+    print(io, "workforce_pool_user_project=", source.workforce_pool_user_project, ",")
+    print(io, "credential_source=")
+    show(io, source.credential_source)
+    print(io, ")")
+end
+
 struct MetadataSource <: GCPSource
     root::String
     service_account::String
@@ -52,10 +111,11 @@ mutable struct GCPCredentials <: CloudCredentials
     expiration::Union{Nothing, DateTime}
     expireThreshold::Dates.Period
     scopes::Vector{String}
+    quota_project_id::String
 end
 
-GCPCredentials(source::GCPSource, auth::GCPAuth, expiration, expireThreshold, scopes::Vector{String}) =
-    GCPCredentials(ReentrantLock(), source, auth, expiration, expireThreshold, scopes)
+GCPCredentials(source::GCPSource, auth::GCPAuth, expiration, expireThreshold, scopes::Vector{String}, quota_project_id::String) =
+    GCPCredentials(ReentrantLock(), source, auth, expiration, expireThreshold, scopes, quota_project_id)
 
 function Base.show(io::IO, creds::GCPCredentials)
     print(io, "GCPCredentials(")
@@ -65,20 +125,18 @@ function Base.show(io::IO, creds::GCPCredentials)
     show(io, creds.auth)
     print(io, ",expiration=", creds.expiration, ",")
     print(io, "expireThreshold=", creds.expireThreshold, ",")
-    print(io, "scopes=", creds.scopes, ")")
+    print(io, "scopes=", creds.scopes, ",")
+    print(io, "quota_project_id=", creds.quota_project_id, ")")
 end
 
-function GCPCredentials(access_token::String, expiration=nothing; expireThreshold=Dates.Minute(5), scopes::Vector{String}=copy(GCP_DEFAULT_SCOPES))
+function GCPCredentials(access_token::String, expiration=nothing; expireThreshold=Dates.Minute(5), scopes::Vector{String}=copy(GCP_DEFAULT_SCOPES), quota_project_id::String="")
     auth = AccessToken(access_token)
-    return GCPCredentials(StaticAuthSource(auth), auth, expiration, expireThreshold, copy(scopes))
+    return GCPCredentials(StaticAuthSource(auth), auth, expiration, expireThreshold, copy(scopes), quota_project_id)
 end
 
-function GCPCredentials(source::ServiceAccountSource; expireThreshold=Dates.Minute(5), scopes::Vector{String}=copy(GCP_DEFAULT_SCOPES))
-    return GCPCredentials(source, AccessToken(""), Dates.now(Dates.UTC) - Dates.Second(1), expireThreshold, copy(scopes))
-end
-
-function GCPCredentials(source::MetadataSource; expireThreshold=Dates.Minute(5), scopes::Vector{String}=copy(GCP_DEFAULT_SCOPES))
-    return GCPCredentials(source, AccessToken(""), Dates.now(Dates.UTC) - Dates.Second(1), expireThreshold, copy(scopes))
+function GCPCredentials(source::GCPSource; expireThreshold=Dates.Minute(5), scopes::Vector{String}=copy(GCP_DEFAULT_SCOPES), quota_project_id::String="")
+    source isa StaticAuthSource && throw(ArgumentError("refreshable GCP sources must not be wrapped in `StaticAuthSource`"))
+    return GCPCredentials(source, AccessToken(""), Dates.now(Dates.UTC) - Dates.Second(1), expireThreshold, copy(scopes), quota_project_id)
 end
 
 function GCPCredentials(; application_credentials_file::Union{Nothing, String}=nothing, expireThreshold=Dates.Minute(5), scopes::Vector{String}=copy(GCP_DEFAULT_SCOPES))
@@ -100,9 +158,29 @@ gcpConfigEnvironmentVariables() = Figgy.kmap(Figgy.EnvironmentVariables(),
     GCP_APPLICATION_CREDENTIALS_ENV => "application_credentials_file"; select=true
 )
 
+function wellKnownApplicationCredentialsFile()
+    if Sys.iswindows()
+        return joinpath(get(ENV, "APPDATA", homedir()), "gcloud", "application_default_credentials.json")
+    end
+    return joinpath(homedir(), ".config", "gcloud", "application_default_credentials.json")
+end
+
 function tokenExpiration(expires_in)
     seconds = expires_in isa Integer ? Int(expires_in) : parse(Int, String(expires_in))
     return Dates.unix2datetime(floor(Int, time()) + seconds)
+end
+
+function parseRFC3339(value)
+    str = String(value)
+    str = endswith(str, 'Z') ? chop(str) : str
+    if occursin('.', str)
+        parts = split(str, '.'; limit=2)
+        frac = parts[2]
+        frac = frac[1:min(lastindex(frac), 3)]
+        frac = rpad(frac, 3, '0')
+        return DateTime(string(parts[1], '.', frac), dateformat"yyyy-mm-ddTHH:MM:SS.s")
+    end
+    return DateTime(str, dateformat"yyyy-mm-ddTHH:MM:SS")
 end
 
 function gcpLoadConfig!(scopes::Vector{String}=copy(GCP_DEFAULT_SCOPES), expireThreshold=Dates.Minute(5))
@@ -110,10 +188,15 @@ function gcpLoadConfig!(scopes::Vector{String}=copy(GCP_DEFAULT_SCOPES), expireT
     Figgy.load!(GCP_CONFIGS, gcpConfigEnvironmentVariables())
     credentials = if haskey(GCP_CONFIGS, "application_credentials_file")
         loadApplicationCredentials(GCP_CONFIGS["application_credentials_file"]; expireThreshold, scopes)
-    elseif metadataAvailable()
-        loadMetadataCredentials(; expireThreshold, scopes)
     else
-        throw(ArgumentError("could not discover GCP credentials; set `$GCP_APPLICATION_CREDENTIALS_ENV` to a service-account credential file or run on a host with Google metadata credentials"))
+        well_known = wellKnownApplicationCredentialsFile()
+        if isfile(well_known)
+            loadApplicationCredentials(well_known; expireThreshold, scopes)
+        elseif metadataAvailable()
+            loadMetadataCredentials(; expireThreshold, scopes)
+        else
+            throw(ArgumentError("could not discover GCP credentials; set `$GCP_APPLICATION_CREDENTIALS_ENV`, create a well-known gcloud ADC file, or run on a host with Google metadata credentials"))
+        end
     end
     Figgy.load!(GCP_CONFIGS, "credentials" => credentials)
     return credentials
@@ -132,18 +215,66 @@ function jsonfield(obj, field::String)
     return obj[field]
 end
 
+quotaProjectID(config) = haskey(config, "quota_project_id") ? String(config["quota_project_id"]) :
+    haskey(config, "workforce_pool_user_project") ? String(config["workforce_pool_user_project"]) : ""
+
+function credentialSourceFormat(source)
+    haskey(source, "format") || return ("text", "")
+    format = source["format"]
+    format_type = String(jsonfield(format, "type"))
+    subject_token_field_name = haskey(format, "subject_token_field_name") ? String(format["subject_token_field_name"]) : ""
+    return (format_type, subject_token_field_name)
+end
+
+function parseExternalCredentialSource(config)
+    source = jsonfield(config, "credential_source")
+    format_type, subject_token_field_name = credentialSourceFormat(source)
+    if haskey(source, "file")
+        return ExternalFileSource(String(source["file"]), format_type, subject_token_field_name)
+    elseif haskey(source, "url")
+        headers = haskey(source, "headers") ? Pair{String, String}[String(k) => String(v) for (k, v) in pairs(source["headers"])] : Pair{String, String}[]
+        return ExternalURLSource(String(source["url"]), headers, format_type, subject_token_field_name)
+    end
+    throw(ArgumentError("unsupported `external_account` credential source; expected `credential_source.file` or `credential_source.url`"))
+end
+
 function loadApplicationCredentials(path::AbstractString; expireThreshold=Dates.Minute(5), scopes::Vector{String}=copy(GCP_DEFAULT_SCOPES))
     isfile(path) || throw(ArgumentError("GCP credentials file does not exist: `$path`"))
     config = JSON.parse(read(path))
     kind = String(jsonfield(config, "type"))
-    kind == "service_account" || throw(ArgumentError("unsupported GCP application credentials type `$kind`; only `service_account` is supported in this phase"))
-    source = ServiceAccountSource(
-        String(jsonfield(config, "client_email")),
-        String(jsonfield(config, "private_key")),
-        haskey(config, "token_uri") ? String(config["token_uri"]) : GCP_DEFAULT_TOKEN_URI,
-        haskey(config, "private_key_id") ? String(config["private_key_id"]) : "",
-    )
-    credentials = GCPCredentials(source; expireThreshold, scopes)
+    quota_project_id = quotaProjectID(config)
+    credentials = if kind == "service_account"
+        source = ServiceAccountSource(
+            String(jsonfield(config, "client_email")),
+            String(jsonfield(config, "private_key")),
+            haskey(config, "token_uri") ? String(config["token_uri"]) : GCP_DEFAULT_TOKEN_URI,
+            haskey(config, "private_key_id") ? String(config["private_key_id"]) : "",
+        )
+        GCPCredentials(source; expireThreshold, scopes, quota_project_id)
+    elseif kind == "authorized_user"
+        source = AuthorizedUserSource(
+            String(jsonfield(config, "client_id")),
+            String(jsonfield(config, "client_secret")),
+            String(jsonfield(config, "refresh_token")),
+            haskey(config, "token_uri") ? String(config["token_uri"]) : GCP_DEFAULT_TOKEN_URI,
+        )
+        GCPCredentials(source; expireThreshold, scopes, quota_project_id)
+    elseif kind == "external_account"
+        impersonation = haskey(config, "service_account_impersonation") ? config["service_account_impersonation"] : nothing
+        lifetime = impersonation === nothing || !haskey(impersonation, "token_lifetime_seconds") ? 0 : Int(impersonation["token_lifetime_seconds"])
+        source = ExternalAccountSource(
+            String(jsonfield(config, "audience")),
+            String(jsonfield(config, "subject_token_type")),
+            haskey(config, "token_url") ? String(config["token_url"]) : GCP_DEFAULT_STS_TOKEN_URI,
+            haskey(config, "service_account_impersonation_url") ? String(config["service_account_impersonation_url"]) : "",
+            lifetime,
+            haskey(config, "workforce_pool_user_project") ? String(config["workforce_pool_user_project"]) : "",
+            parseExternalCredentialSource(config),
+        )
+        GCPCredentials(source; expireThreshold, scopes, quota_project_id)
+    else
+        throw(ArgumentError("unsupported GCP application credentials type `$kind`; expected `service_account`, `authorized_user`, or `external_account`"))
+    end
     refresh!(credentials)
     return credentials
 end
@@ -180,9 +311,38 @@ function refresh!(x::GCPCredentials, source::ServiceAccountSource)
     return x
 end
 
+function refresh!(x::GCPCredentials, source::AuthorizedUserSource)
+    body = HTTP.escapeuri(Dict(
+        "client_id" => source.client_id,
+        "client_secret" => source.client_secret,
+        "refresh_token" => source.refresh_token,
+        "grant_type" => GCP_REFRESH_TOKEN_GRANT_TYPE,
+    ))
+    resp = HTTP.post(source.token_uri, ["Content-Type" => "application/x-www-form-urlencoded"], body)
+    payload = JSON.parse(resp.body)
+    x.auth = AccessToken(String(jsonfield(payload, "access_token")))
+    x.expiration = tokenExpiration(jsonfield(payload, "expires_in"))
+    return x
+end
+
+function refresh!(x::GCPCredentials, source::ExternalAccountSource)
+    subject_token = loadSubjectToken(source.credential_source)
+    payload = JSON.parse(exchangeExternalAccountToken(source, subject_token, x.scopes).body)
+    access_token = String(jsonfield(payload, "access_token"))
+    expiration = tokenExpiration(jsonfield(payload, "expires_in"))
+    if !isempty(source.service_account_impersonation_url)
+        access_token, expiration = impersonateServiceAccount(source, access_token, x.scopes)
+    end
+    x.auth = AccessToken(access_token)
+    x.expiration = expiration
+    if isempty(x.quota_project_id)
+        x.quota_project_id = source.workforce_pool_user_project
+    end
+    return x
+end
+
 function refresh!(x::GCPCredentials, source::MetadataSource)
-    url = metadataTokenURL(source)
-    resp = HTTP.get(url, ["Metadata-Flavor" => "Google"])
+    resp = HTTP.get(metadataTokenURL(source), ["Metadata-Flavor" => "Google"])
     payload = JSON.parse(resp.body)
     x.auth = AccessToken(String(jsonfield(payload, "access_token")))
     x.expiration = tokenExpiration(jsonfield(payload, "expires_in"))
@@ -247,6 +407,58 @@ function signRS256(private_key::String, message::String)
     return signature
 end
 
+function loadSubjectToken(source::ExternalFileSource)
+    isfile(source.file) || throw(ArgumentError("external_account credential source file does not exist: `$(source.file)`"))
+    return parseSubjectToken(read(source.file), source.format_type, source.subject_token_field_name)
+end
+
+function loadSubjectToken(source::ExternalURLSource)
+    resp = HTTP.get(source.url, source.headers)
+    return parseSubjectToken(resp.body, source.format_type, source.subject_token_field_name)
+end
+
+function parseSubjectToken(value::AbstractVector{UInt8}, format_type::String, subject_token_field_name::String)
+    return parseSubjectToken(String(value), format_type, subject_token_field_name)
+end
+
+function parseSubjectToken(value::AbstractString, format_type::String, subject_token_field_name::String)
+    if format_type == "text"
+        token = String(strip(value))
+    elseif format_type == "json"
+        isempty(subject_token_field_name) && throw(ArgumentError("json external_account credential sources must set `format.subject_token_field_name`"))
+        token = String(jsonfield(JSON.parse(value), subject_token_field_name))
+    else
+        throw(ArgumentError("unsupported external_account credential source format `$format_type`; expected `text` or `json`"))
+    end
+    isempty(token) && throw(ArgumentError("external_account subject token must not be empty"))
+    return token
+end
+
+function exchangeExternalAccountToken(source::ExternalAccountSource, subject_token::String, scopes::Vector{String})
+    scope = isempty(source.service_account_impersonation_url) ? join(scopes, ' ') : join(GCP_IMPERSONATION_SCOPES, ' ')
+    body = JSON.json(Dict(
+        "audience" => source.audience,
+        "grantType" => GCP_TOKEN_EXCHANGE_GRANT_TYPE,
+        "requestedTokenType" => GCP_REQUESTED_TOKEN_TYPE,
+        "scope" => scope,
+        "subjectToken" => subject_token,
+        "subjectTokenType" => source.subject_token_type,
+    ))
+    return HTTP.post(source.token_uri, ["Content-Type" => "application/json"], body)
+end
+
+function impersonateServiceAccount(source::ExternalAccountSource, access_token::String, scopes::Vector{String})
+    body = Dict{String, Any}("scope" => copy(scopes))
+    if source.service_account_token_lifetime_seconds > 0
+        body["lifetime"] = string(source.service_account_token_lifetime_seconds, "s")
+    end
+    resp = HTTP.post(source.service_account_impersonation_url,
+        ["Content-Type" => "application/json", "Authorization" => "Bearer $access_token"],
+        JSON.json(body))
+    payload = JSON.parse(resp.body)
+    return String(jsonfield(payload, "accessToken")), parseRFC3339(jsonfield(payload, "expireTime"))
+end
+
 function reloadGCECredentials!(root=nothing; service_account::String=GCP_DEFAULT_SERVICE_ACCOUNT, expireThreshold=Dates.Minute(5), scopes::Vector{String}=copy(GCP_DEFAULT_SCOPES))
     credentials = loadMetadataCredentials(; root=something(root, GCP_DEFAULT_METADATA_ROOT), service_account, expireThreshold, scopes)
     Figgy.load!(GCP_CONFIGS, "credentials" => credentials)
@@ -259,5 +471,8 @@ function gcpsign!(request::HTTP.Request; credentials::Union{Nothing, GCPCredenti
     auth isa AccessToken || throw(ArgumentError("unsupported GCP credentials type `$(typeof(auth))`"))
     HTTP.removeheader(request, "Authorization")
     HTTP.setheader(request, "Authorization" => "Bearer $(auth.token)")
+    if !isempty(credentials.quota_project_id)
+        HTTP.setheader(request, "x-goog-user-project" => credentials.quota_project_id)
+    end
     return
 end
