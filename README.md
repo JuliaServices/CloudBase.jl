@@ -12,7 +12,7 @@
 Current provider status on `main`:
 - AWS: mature
 - Azure: mature
-- GCP: request client scaffolded with explicit bearer-token credentials; broader ADC and Cloud Storage support are in progress
+- GCP: request client supports explicit bearer tokens, `service_account` application credentials, and metadata-server credentials; broader ADC and Cloud Storage support are still in progress
 
 ## Installation
 

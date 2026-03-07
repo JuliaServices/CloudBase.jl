@@ -1,6 +1,6 @@
 module CloudTest
 
-export TempFile, Minio, Azurite, ECS, EC2, AzureVM
+export TempFile, Minio, Azurite, ECS, EC2, AzureVM, GCPTokenServer, GCPMetadata
 
 import ..CloudCredentials, ..AWS, ..Azure, ..AbstractStore
 
@@ -498,5 +498,66 @@ function with(f)
 end
 
 end # module AzureVM
+
+module GCPTokenServer
+
+using HTTP
+
+const RESP = """
+{
+  "access_token": "GCP_SERVICE_ACCOUNT_TOKEN",
+  "expires_in": 3599,
+  "token_type": "Bearer"
+}"""
+
+function with(f; port=50399, response::AbstractString=RESP, request_ref=nothing, request_count=Ref(0))
+    server = HTTP.serve!(port) do req
+        if req.method == "POST" && req.target == "/token"
+            request_count[] += 1
+            request_ref === nothing || (request_ref[] = (method=req.method, target=req.target, headers=copy(req.headers), body=String(req.body)))
+            return HTTP.Response(200, response)
+        else
+            return HTTP.Response(404)
+        end
+    end
+    try
+        f(request_count)
+    finally
+        close(server)
+    end
+end
+
+end # module GCPTokenServer
+
+module GCPMetadata
+
+using HTTP
+
+const RESP = """
+{
+  "access_token": "GCP_METADATA_TOKEN",
+  "expires_in": 3599,
+  "token_type": "Bearer"
+}"""
+
+function with(f; port=50400, response::AbstractString=RESP, request_ref=nothing, request_count=Ref(0))
+    server = HTTP.serve!(port) do req
+        if req.method == "GET" && startswith(req.target, "/computeMetadata/v1/instance/service-accounts/") && endswith(req.target, "/token")
+            @assert HTTP.header(req, "Metadata-Flavor") == "Google"
+            request_count[] += 1
+            request_ref === nothing || (request_ref[] = (method=req.method, target=req.target, headers=copy(req.headers), body=String(req.body)))
+            return HTTP.Response(200, response)
+        else
+            return HTTP.Response(404)
+        end
+    end
+    try
+        f(request_count)
+    finally
+        close(server)
+    end
+end
+
+end # module GCPMetadata
 
 end # module CloudTest

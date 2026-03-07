@@ -31,7 +31,7 @@
 - Verification evidence:
   - `2026-03-06`: `julia --project=. --startup-file=no -e 'using Pkg; Pkg.test()'` passed after adding `src/gcp.jl`, request tests, redaction coverage, and doc updates.
 
-### [ ] ITEM-002 (P0) Implement service-account and metadata-server bearer credential flows
+### [x] ITEM-002 (P0) Implement service-account and metadata-server bearer credential flows
 - Description: Production GCP workloads need first-class non-interactive auth. Add service-account JSON support with JWT bearer exchange, metadata-server access token refresh, expiration handling, and ADC discovery for these flows.
 - Desired outcome: `GCP.Credentials()` can discover `GOOGLE_APPLICATION_CREDENTIALS` service-account files and metadata-server credentials, refresh tokens automatically before expiry, and safely reuse credentials across concurrent requests.
 - Affected files: `src/gcp.jl`, `src/CloudBase.jl`, `src/CloudTest.jl`, `test/runtests.jl`, `Project.toml`, `Manifest.toml`
@@ -44,14 +44,18 @@
 - Verification:
   - `julia --project=. --startup-file=no -e 'using Pkg; Pkg.test()'`
 - Assumptions:
-  - Adding a focused crypto dependency for RS256 signing is acceptable if the current dependency set lacks a production-grade primitive.
+  - Adding `OpenSSL.jl` as a focused crypto dependency for RS256 signing is acceptable for this item.
   - Mock token and metadata servers are sufficient to validate CloudBase’s auth behavior without a live GCP dependency.
+  - Adding `JSON.jl` as a direct dependency is acceptable so credential files and JWT/token payloads can be encoded/decoded robustly.
 - Risks:
   - Service-account JWT generation has edge cases around base64url encoding, clock skew, and PEM parsing.
   - Metadata refresh logic can become flaky if expiry handling is off by even a small amount.
 - Completion criteria:
   - Service-account and metadata-backed credentials refresh locally in tests.
   - Concurrency/refresh coverage exists and passes reliably.
+- Verification evidence:
+  - `2026-03-07`: `julia --project=. --startup-file=no -e 'using Pkg; Pkg.resolve()'` updated the manifest for direct `JSON`/`OpenSSL` deps.
+  - `2026-03-07`: `julia --project=. --startup-file=no -e 'using Pkg; Pkg.test()'` passed with new service-account, metadata, JWT-shape, RS256 verification, and refresh-concurrency coverage.
 
 ### [ ] ITEM-003 (P1) Implement full ADC file support for `authorized_user` and `external_account`
 - Description: To make `GCP.Credentials()` feel like real ADC instead of a partial implementation, support the remaining common credential file types used by local development and keyless CI.
