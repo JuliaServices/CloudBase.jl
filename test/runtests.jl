@@ -1,8 +1,32 @@
-using CloudBase, Test, CloudBase.CloudTest, JSON3, Dates, HTTP
+using CloudBase, Test, CloudBase.CloudTest, JSON3, JSON, Dates, HTTP, OpenSSL
 using CloudBase: AWS, Azure, GCP
 using Sockets, Random
 
 const x32bit = Sys.WORD_SIZE == 32
+
+function verifyRS256(private_key::String, message::String, signature::Vector{UInt8})
+    key = OpenSSL.EvpPKey(private_key)
+    ctx = OpenSSL.EvpDigestContext()
+    digest = OpenSSL.EvpSHA256()
+    if ccall((:EVP_DigestVerifyInit, OpenSSL.libcrypto), Cint,
+            (OpenSSL.EvpDigestContext, Ptr{Cvoid}, OpenSSL.EvpDigest, Ptr{Cvoid}, OpenSSL.EvpPKey),
+            ctx, C_NULL, digest, C_NULL, key) != 1
+        throw(OpenSSL.OpenSSLError())
+    end
+    data = Vector{UInt8}(codeunits(message))
+    GC.@preserve data begin
+        if ccall((:EVP_DigestVerifyUpdate, OpenSSL.libcrypto), Cint,
+                (OpenSSL.EvpDigestContext, Ptr{UInt8}, Csize_t),
+                ctx, pointer(data), length(data)) != 1
+            throw(OpenSSL.OpenSSLError())
+        end
+    end
+    GC.@preserve signature begin
+        return ccall((:EVP_DigestVerifyFinal, OpenSSL.libcrypto), Cint,
+            (OpenSSL.EvpDigestContext, Ptr{UInt8}, Csize_t),
+            ctx, pointer(signature), length(signature)) == 1
+    end
+end
 
 @testset "AWSSigV4" begin
     file = abspath(joinpath(dirname(pathof(CloudBase)), "../test/resources/awsSig4Cases.json"))
@@ -191,6 +215,78 @@ end
         @test take!(auth_headers) == ""
     finally
         close(server)
+    end
+end
+
+@testset "GCP Service Account" begin
+    request_ref = Ref{Any}()
+    GCPTokenServer.with(; request_ref=request_ref) do request_count
+        mktemp() do path, io
+            private_key = read(joinpath(dirname(pathof(CloudBase)), "../src/test.key"), String)
+            write(io, JSON.json(Dict(
+                "type" => "service_account",
+                "client_email" => "service-account@test.local",
+                "private_key" => private_key,
+                "private_key_id" => "test-key-id",
+                "token_uri" => "http://127.0.0.1:50399/token",
+            )))
+            close(io)
+            ENV[CloudBase.GCP_APPLICATION_CREDENTIALS_ENV] = path
+            try
+                creds = GCP.Credentials()
+                @test creds.auth isa CloudBase.AccessToken
+                @test creds.auth.token == "GCP_SERVICE_ACCOUNT_TOKEN"
+                @test request_count[] == 1
+
+                request = request_ref[]
+                params = Dict(HTTP.URIs.queryparampairs(HTTP.URI("http://127.0.0.1/?$(request.body)")))
+                @test params["grant_type"] == CloudBase.GCP_JWT_GRANT_TYPE
+
+                parts = split(params["assertion"], '.')
+                @test length(parts) == 3
+                header = JSON.parse(String(CloudBase.base64urldecode(parts[1])))
+                payload = JSON.parse(String(CloudBase.base64urldecode(parts[2])))
+                @test header["alg"] == "RS256"
+                @test header["typ"] == "JWT"
+                @test header["kid"] == "test-key-id"
+                @test payload["iss"] == "service-account@test.local"
+                @test payload["scope"] == join(CloudBase.GCP_DEFAULT_SCOPES, ' ')
+                @test payload["aud"] == "http://127.0.0.1:50399/token"
+                @test Int(payload["exp"]) - Int(payload["iat"]) == 3600
+                @test verifyRS256(private_key, string(parts[1], '.', parts[2]), CloudBase.base64urldecode(parts[3]))
+
+                creds.expiration = Dates.now(Dates.UTC) - Dates.Second(1)
+                @sync for _ = 1:8
+                    @async begin
+                        auth = CloudBase.getCredentials(creds)
+                        @test auth.token == "GCP_SERVICE_ACCOUNT_TOKEN"
+                    end
+                end
+                @test request_count[] == 2
+            finally
+                delete!(ENV, CloudBase.GCP_APPLICATION_CREDENTIALS_ENV)
+            end
+        end
+    end
+end
+
+@testset "GCP Metadata" begin
+    request_ref = Ref{Any}()
+    GCPMetadata.with(; request_ref=request_ref) do request_count
+        creds = CloudBase.reloadGCECredentials!("http://127.0.0.1:50400")
+        @test creds.auth isa CloudBase.AccessToken
+        @test creds.auth.token == "GCP_METADATA_TOKEN"
+        @test request_count[] == 1
+        @test request_ref[].target == "/computeMetadata/v1/instance/service-accounts/default/token"
+
+        creds.expiration = Dates.now(Dates.UTC) - Dates.Second(1)
+        @sync for _ = 1:6
+            @async begin
+                auth = CloudBase.getCredentials(creds)
+                @test auth.token == "GCP_METADATA_TOKEN"
+            end
+        end
+        @test request_count[] == 2
     end
 end
 

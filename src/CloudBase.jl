@@ -2,8 +2,8 @@ module CloudBase
 
 export CloudTest
 
-using Dates, Base64, Sockets
-using HTTP, URIs, SHA, MD5, LoggingExtras, Figgy
+using Dates, Base64, Random, Sockets
+using HTTP, URIs, SHA, MD5, LoggingExtras, Figgy, JSON, OpenSSL
 import FunctionWrappers: FunctionWrapper
 
 """
@@ -285,9 +285,9 @@ const DOCS = """
     GCP.open(method, url, headers[, body]; kw...)
 
 HTTP.jl client methods that additionally *each* take a `credentials` keyword argument,
-which should be a `GCP.Credentials` object. This initial implementation supports
-explicit bearer-token credentials; additional ADC-backed credential flows can be layered
-into the same type without changing the request API.
+which should be a `GCP.Credentials` object. GCP credentials support explicit bearer
+tokens, `service_account` application credentials, and metadata-server tokens on
+Google-managed compute.
 
 Otherwise, these methods operate exactly like their `HTTP.method` counterparts, accepting
 all the same positional and keyword arguments.
@@ -300,10 +300,11 @@ end
 
 """
     CloudBase.GCP.Credentials(access_token[, expiration]; expireThreshold=Dates.Minute(5))
+    CloudBase.GCP.Credentials(; application_credentials_file=nothing, scopes=[...], expireThreshold=Dates.Minute(5))
 
-Credentials object used for authenticating Google Cloud requests with an explicit bearer token.
-If `expiration` is provided, later credential implementations can use the same shape for refresh
-logic while preserving the request API.
+Credentials object used for authenticating Google Cloud requests. An explicit bearer token
+can be provided directly, or `GCP.Credentials()` can load a `service_account` application
+credentials file or Google metadata-server credentials.
 """
 const Credentials = GCPCredentials
 
