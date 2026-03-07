@@ -81,7 +81,7 @@
 - Verification evidence:
   - `2026-03-07`: `julia --project=. --startup-file=no -e 'using Pkg; Pkg.test()'` passed with coverage for well-known `authorized_user` ADC files, file-sourced `external_account` configs with STS + impersonation, and url-sourced `external_account` configs.
 
-### [ ] ITEM-004 (P1) Add Cloud Storage bucket primitives and HMAC/XML request signing
+### [x] ITEM-004 (P1) Add Cloud Storage bucket primitives and HMAC/XML request signing
 - Description: CloudStore will eventually need first-class GCS support. Add the CloudBase pieces that make that practical: a GCP bucket abstraction and explicit Cloud Storage XML HMAC signing/interoperability support.
 - Desired outcome: `CloudBase.GCP.Bucket` exists, Cloud Storage XML requests can be authenticated with HMAC credentials, and the implementation supports the migration-oriented interop path without compromising the default bearer-token path.
 - Affected files: `src/gcp.jl`, `src/CloudBase.jl`, `test/runtests.jl`, `README.md`, `docs/src/index.md`
@@ -96,12 +96,15 @@
 - Assumptions:
   - HMAC support should be explicit and not silently selected for generic Google API requests.
   - `GCP.Bucket` belongs in CloudBase because the existing provider store types already live there.
+  - The first HMAC implementation should target Cloud Storage's documented `AWS4-HMAC-SHA256` simple-migration path, which is the most relevant interop mode for eventual CloudStore work.
 - Risks:
   - Canonicalization bugs can be hard to spot without thorough fixture coverage.
   - Mixing bearer and HMAC paths in one module can create confusing behavior if not documented precisely.
 - Completion criteria:
   - GCS bucket primitives and HMAC signing are implemented and tested.
   - The intended downstream path into CloudStore is materially unblocked.
+- Verification evidence:
+  - `2026-03-07`: `julia --project=. --startup-file=no -e 'using Pkg; Pkg.test()'` passed with path-style `GCP.Bucket` coverage and Cloud Storage XML HMAC interop tests against the `AWS4-HMAC-SHA256` simple-migration path.
 
 ### [ ] ITEM-005 (P1) Add live GCP smoke-test harness and finish documentation/polish
 - Description: Mock-heavy tests should be the default, but we also want an opt-in way to validate a real credential against live GCP. Finish the documentation and add a small, env-gated live harness without making CI depend on it.

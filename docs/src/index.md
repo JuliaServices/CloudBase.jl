@@ -38,7 +38,7 @@ The package specifically *does not* aim to do any of the following:
 The core of the package then, is in 3 *non*-exported modules (that you can import yourself if so desired):
   * `CloudBase.AWS`: provides `AWS.get`, `AWS.put`, `AWS.post`, `AWS.request` etc. as wrappers to corresponding `HTTP` methods
   * `CloudBase.Azure`: provides `Azure.get`, `Azure.put`, `Azure.post`, `Azure.request` etc. as wrappers to corresponding `HTTP` methods
-  * `CloudBase.GCP`: provides `GCP.get`, `GCP.put`, `GCP.post`, `GCP.request` etc. as wrappers to corresponding `HTTP` methods; `main` currently supports explicit bearer tokens, `service_account`, `authorized_user`, and file/url-based `external_account` credentials, plus metadata-server credentials, with Cloud Storage-specific work still in progress
+  * `CloudBase.GCP`: provides `GCP.get`, `GCP.put`, `GCP.post`, `GCP.request` etc. as wrappers to corresponding `HTTP` methods; `main` currently supports explicit bearer tokens, `service_account`, `authorized_user`, and file/url-based `external_account` credentials, plus metadata-server credentials and Cloud Storage XML HMAC interop via `AWS4-HMAC-SHA256`
 
 That means *using* this packages behavior is basically like dropping in a cloud-specific module call in place
 of where you would have been calling HTTP.jl, like:

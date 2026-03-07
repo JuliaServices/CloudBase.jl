@@ -416,6 +416,44 @@ end
     end
 end
 
+@testset "GCP HMAC XML Interop" begin
+    bucket = GCP.Bucket("test-bucket")
+    @test bucket.baseurl == "https://storage.googleapis.com/test-bucket/"
+
+    creds = GCP.Credentials("HMAC_ACCESS_ID", "HMAC_SECRET"; quota_project_id="test-project")
+    request_time = DateTime(2026, 1, 2, 3, 4, 5)
+    req = HTTP.Request("PUT", "/test-bucket/test-object", ["Content-Type" => "text/plain"], "hello";
+        url=HTTP.URI("https://storage.googleapis.com/test-bucket/test-object"))
+    expected = HTTP.Request("PUT", "/test-bucket/test-object", ["Content-Type" => "text/plain"], "hello";
+        url=HTTP.URI("https://storage.googleapis.com/test-bucket/test-object"))
+
+    CloudBase.gcpsign!(req; credentials=creds, x_amz_date=request_time)
+    HTTP.setheader(expected, "x-amz-project-id" => "test-project")
+    CloudBase.awssign!(expected; service="s3", region="us-east-1", credentials=CloudBase.AWSCredentials("HMAC_ACCESS_ID", "HMAC_SECRET"), x_amz_date=request_time)
+
+    @test HTTP.header(req, "Authorization") == HTTP.header(expected, "Authorization")
+    @test HTTP.header(req, "x-amz-date") == HTTP.header(expected, "x-amz-date")
+    @test HTTP.header(req, "x-amz-content-sha256") == HTTP.header(expected, "x-amz-content-sha256")
+    @test HTTP.header(req, "x-amz-project-id") == "test-project"
+
+    port, socket = Sockets.listenany(IPv4(0), rand(RandomDevice(), 10000:50000))
+    close(socket)
+    request_ref = Ref{Any}()
+    server = HTTP.serve!(ip"127.0.0.1", port) do request
+        request_ref[] = (method=request.method, target=request.target, headers=copy(request.headers), body=String(request.body))
+        return HTTP.Response(200, "ok")
+    end
+    try
+        resp = GCP.get("http://127.0.0.1:$port/test-bucket/test-object"; credentials=creds, x_amz_date=request_time)
+        @test resp.status == 200
+        headers = headerdict(request_ref[].headers)
+        @test startswith(headers["Authorization"], "AWS4-HMAC-SHA256 Credential=HMAC_ACCESS_ID/")
+        @test headers["x-amz-project-id"] == "test-project"
+    finally
+        close(server)
+    end
+end
+
 @testset "GCP Metadata" begin
     request_ref = Ref{Any}()
     GCPMetadata.with(; request_ref=request_ref) do request_count
