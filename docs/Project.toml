@@ -1,3 +1,4 @@
 [deps]
 CloudBase = "85eb1798-d7c4-4918-bb13-c944d38e27ed"
 Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"
+Figgy = "937e9308-674a-48ca-a404-047094c8c902"

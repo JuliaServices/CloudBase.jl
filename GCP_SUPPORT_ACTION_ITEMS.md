@@ -106,7 +106,7 @@
 - Verification evidence:
   - `2026-03-07`: `julia --project=. --startup-file=no -e 'using Pkg; Pkg.test()'` passed with path-style `GCP.Bucket` coverage and Cloud Storage XML HMAC interop tests against the `AWS4-HMAC-SHA256` simple-migration path.
 
-### [ ] ITEM-005 (P1) Add live GCP smoke-test harness and finish documentation/polish
+### [x] ITEM-005 (P1) Add live GCP smoke-test harness and finish documentation/polish
 - Description: Mock-heavy tests should be the default, but we also want an opt-in way to validate a real credential against live GCP. Finish the documentation and add a small, env-gated live harness without making CI depend on it.
 - Desired outcome: Contributors can run a focused live GCP smoke test when credentials are available, the default test suite remains hermetic, and the docs clearly explain supported auth modes, environment variables, and test entrypoints.
 - Affected files: `test/runtests.jl`, `README.md`, `docs/src/index.md`, `docs/src/reference.md`, `.github/workflows/ci.yml`
@@ -127,6 +127,9 @@
   - Default tests remain local/mock-based.
   - There is a documented opt-in live harness for validating real credentials.
   - Docs are consistent with the final shipped behavior.
+- Verification evidence:
+  - `2026-03-07`: `julia --project=. --startup-file=no -e 'using Pkg; Pkg.test()'` passed with the new live harness still gated off by default.
+  - `2026-03-07`: `julia --project=docs --startup-file=no docs/make.jl` completed successfully after pinning the docs build to the local checkout and documenting the new GCP reference entries.
 
 ## Continuity
 

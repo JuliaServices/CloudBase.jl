@@ -30,6 +30,29 @@ end
 
 headerdict(headers) = Dict(String(k) => String(v) for (k, v) in headers)
 
+function requireenv(name::String)
+    haskey(ENV, name) || error("missing required live-test environment variable `$name`")
+    return ENV[name]
+end
+
+function liveGCPCredentials()
+    quota_project_id = get(ENV, "CLOUDBASE_GCP_LIVE_QUOTA_PROJECT", "")
+    if haskey(ENV, "CLOUDBASE_GCP_LIVE_HMAC_ACCESS_ID") && haskey(ENV, "CLOUDBASE_GCP_LIVE_HMAC_SECRET")
+        return GCP.Credentials(
+            ENV["CLOUDBASE_GCP_LIVE_HMAC_ACCESS_ID"],
+            ENV["CLOUDBASE_GCP_LIVE_HMAC_SECRET"];
+            quota_project_id,
+        )
+    elseif haskey(ENV, "CLOUDBASE_GCP_LIVE_ACCESS_TOKEN")
+        return GCP.Credentials(ENV["CLOUDBASE_GCP_LIVE_ACCESS_TOKEN"]; quota_project_id)
+    elseif haskey(ENV, "CLOUDBASE_GCP_LIVE_CREDENTIALS_FILE")
+        return GCP.Credentials(; application_credentials_file=ENV["CLOUDBASE_GCP_LIVE_CREDENTIALS_FILE"])
+    elseif haskey(ENV, CloudBase.GCP_APPLICATION_CREDENTIALS_ENV)
+        return GCP.Credentials()
+    end
+    error("set one of `CLOUDBASE_GCP_LIVE_ACCESS_TOKEN`, `CLOUDBASE_GCP_LIVE_CREDENTIALS_FILE`, `$((CloudBase.GCP_APPLICATION_CREDENTIALS_ENV))`, or the HMAC pair `CLOUDBASE_GCP_LIVE_HMAC_ACCESS_ID` / `CLOUDBASE_GCP_LIVE_HMAC_SECRET`")
+end
+
 @testset "AWSSigV4" begin
     file = abspath(joinpath(dirname(pathof(CloudBase)), "../test/resources/awsSig4Cases.json"))
     cases = JSON3.read(read(file))
@@ -472,6 +495,26 @@ end
         end
         @test request_count[] == 2
     end
+end
+
+if get(ENV, "CLOUDBASE_RUN_GCP_LIVE_TESTS", "") == "1"
+@testset "GCP Live" begin
+    bucket = requireenv("CLOUDBASE_GCP_LIVE_BUCKET")
+    credentials = liveGCPCredentials()
+    key = "cloudbase-live-$(time_ns()).txt"
+    data = "cloudbase-live-$(rand(UInt))"
+    url = "$(GCP.Bucket(bucket).baseurl)$key"
+
+    put_resp = GCP.put(url, ["Content-Type" => "text/plain"], data; credentials)
+    @test put_resp.status in (200, 201)
+
+    get_resp = GCP.get(url; credentials)
+    @test get_resp.status == 200
+    @test String(get_resp.body) == data
+
+    delete_resp = GCP.delete(url; credentials)
+    @test delete_resp.status in (200, 202, 204)
+end
 end
 
 # test debug logs are printed for azurite
