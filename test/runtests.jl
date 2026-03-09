@@ -28,7 +28,16 @@ function verifyRS256(private_key::String, message::String, signature::Vector{UIn
     end
 end
 
-headerdict(headers) = Dict(String(k) => String(v) for (k, v) in headers)
+function headerdict(headers)
+    dict = Dict{String, String}()
+    for (k, v) in headers
+        key = String(k)
+        value = String(v)
+        dict[key] = value
+        dict[lowercase(key)] = value
+    end
+    return dict
+end
 
 function requireenv(name::String)
     haskey(ENV, name) || error("missing required live-test environment variable `$name`")
