@@ -171,6 +171,18 @@ if !x32bit
 end
 end
 
+@testset "Reseau transport helpers" begin
+    headers = CloudBase.Reseau.HTTP.Headers(["A" => "1", "A" => "2"])
+    @test CloudBase._to_http_headers(headers) == ["A" => "1", "A" => "2"]
+
+    payload = UInt8[0x01, 0x02, 0x03]
+    uri = HTTP.URI("https://example.com/blob")
+    req = HTTP.Request("PUT", HTTP.resource(uri), HTTP.Headers(), payload; url=uri)
+    body, len = CloudBase._prepare_transport_body!(req)
+    @test body === payload
+    @test len == Int64(length(payload))
+end
+
 @testset "Concurrent Minio/Azurite test servers" begin
     mconfigs = Vector{Any}(undef, 10)
     aconfigs = Vector{Any}(undef, 10)

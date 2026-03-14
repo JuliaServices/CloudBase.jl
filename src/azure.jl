@@ -17,8 +17,13 @@ Base.show(io::IO, ::AccessToken) = print(io, "AccessToken(****)")
 
 struct SASToken <: AzureAuth
     token::String # just the query string of a SAS uri; url?sas_token
+    pairs::Vector{Pair{String, String}}
 
-    SASToken(str) = new(lstrip(String(str), '?'))
+    function SASToken(str)
+        token = lstrip(String(str), '?')
+        pairs = Pair{String, String}[String(pair.first) => String(pair.second) for pair in URIs.queryparampairs(token)]
+        return new(token, pairs)
+    end
 end
 
 Base.show(io::IO, ::SASToken) = print(io, "SASToken(****)")
@@ -156,6 +161,24 @@ function combineParams(pairs)
     return String(take!(io))
 end
 
+function _append_sas_query!(request::HTTP.Request, creds::SASToken)
+    url = request.url
+    query = String(url.query)
+    if isempty(query)
+        request.url = URI(url; query=creds.token)
+    elseif occursin("sig=", query)
+        merged = URIs.queryparampairs(url)
+        for pair in creds.pairs
+            HTTP.setbyfirst(merged, pair)
+        end
+        request.url = URI(url; query=merged)
+    else
+        request.url = URI(url; query=string(query, '&', creds.token))
+    end
+    request.target = HTTP.resource(request.url)
+    return nothing
+end
+
 function azuresign!(request::HTTP.Request; credentials=nothing, addMd5::Bool=true, kw...)
     # if credentials not provided, assume public access
     credentials === nothing && return
@@ -176,14 +199,7 @@ function azuresign!(request::HTTP.Request; credentials=nothing, addMd5::Bool=tru
         HTTP.setheader(request, "Authorization" => "Bearer $(creds.token)")
         return
     elseif creds isa SASToken
-        url = request.url
-        query = URIs.queryparampairs(url)
-        toks = URIs.queryparampairs(creds.token)
-        for pair in toks
-            HTTP.setbyfirst(query, pair)
-        end
-        request.url = URI(url; query)
-        request.target = HTTP.resource(request.url)
+        _append_sas_query!(request, creds)
         return
     end
 

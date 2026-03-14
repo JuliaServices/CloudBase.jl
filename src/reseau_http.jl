@@ -120,10 +120,11 @@ end
 
 function _to_http_headers(headers)::Vector{Pair{String, String}}
     pairs = Pair{String, String}[]
-    for key in HT.header_keys(headers)
-        for value in HT.get_headers(headers, key)
-            push!(pairs, String(key) => String(value))
-        end
+    sizehint!(pairs, length(headers))
+    for (key, value) in headers
+        key_s = key isa String ? key : String(key)
+        value_s = value isa String ? value : String(value)
+        push!(pairs, key_s => value_s)
     end
     return pairs
 end
@@ -146,8 +147,7 @@ end
 function _prepare_transport_body!(req::HTTP.Request)
     body = req.body
     if body isa AbstractVector{UInt8}
-        bytes = body isa Vector{UInt8} ? copy(body) : Vector{UInt8}(body)
-        return bytes, Int64(length(bytes))
+        return body, Int64(length(body))
     elseif body isa AbstractString
         return String(body), Int64(ncodeunits(body))
     elseif body isa IO
