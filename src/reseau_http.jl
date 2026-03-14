@@ -363,17 +363,6 @@ function cloudrequest(
     end
     _ensure_reseau_host_header!(req)
     _ensure_reseau_content_length!(req)
-    ctx = Dict{Symbol, Any}()
-    ctx[:connect_errors] = 0
-    ctx[:io_errors] = 0
-    ctx[:status_errors] = 0
-    ctx[:timeout_errors] = 0
-    ctx[:connect_duration_ms] = 0.0
-    ctx[:read_duration_ms] = 0.0
-    ctx[:write_duration_ms] = 0.0
-    ctx[:nbytes] = 0
-    ctx[:nbytes_written] = req.content_length
-    ctx[:retryattempt] = 0
     PREREQUEST_CALLBACK[](req.method)
     if awsv2
         uri = awssignv2!(req, uri; body_params=sigv2_body_params, credentials, kw...)
@@ -384,13 +373,23 @@ function cloudrequest(
     elseif gcp
         uri = gcpsign!(req, uri; credentials, kw...)
     end
+    http_req = _http_request_from_reseau(req, uri)
+    ctx = http_req.context
+    ctx[:connect_errors] = 0
+    ctx[:io_errors] = 0
+    ctx[:status_errors] = 0
+    ctx[:timeout_errors] = 0
+    ctx[:connect_duration_ms] = 0.0
+    ctx[:read_duration_ms] = 0.0
+    ctx[:write_duration_ms] = 0.0
+    ctx[:nbytes] = 0
     ctx[:nbytes_written] = req.content_length
+    ctx[:retryattempt] = 0
     readtimeout >= 0 || throw(ArgumentError("readtimeout must be >= 0"))
     if readtimeout > 0
         timeout_ns = Int64(round(readtimeout * 1.0e9))
         HT.set_deadline!(req.context, Int64(time_ns()) + timeout_ns)
     end
-    http_req = _http_request_from_reseau(req, uri)
     failed = false
     release = pool === nothing ? nothing : () -> Base.release(pool.semaphore)
     pool === nothing || Base.acquire(pool.semaphore)
