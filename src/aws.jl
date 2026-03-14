@@ -1,4 +1,5 @@
 const AWS_CONFIGS = Figgy.Store()
+const RHT = Reseau.HTTP
 
 mutable struct AWSCredentials <: CloudCredentials
     lock::ReentrantLock
@@ -271,7 +272,7 @@ end
 
 bytes(x::String) = unsafe_wrap(Array, pointer(x), sizeof(x))
 trimall(x) = strip(replace(x, r"[ ]{2,}" => " "))
-canonicalHeader(x::HTTP.Header) = strip(lowercase(x.first)) => trimall(x.second)
+canonicalHeader(x::Pair{<:AbstractString, <:AbstractString}) = strip(lowercase(String(x.first))) => trimall(String(x.second))
 const ISO8601 = dateformat"yyyymmdd\THHMMSS\Z"
 const ISO8601DATE = dateformat"yyyymmdd"
 const SIG2DF = dateformat"yyyy-mm-dd\THH:MM:SS\Z"
@@ -307,6 +308,13 @@ function deduplicateHeaders!(headers)
     return
 end
 
+function _request_body_bytes(request::RHT.Request)
+    body = request.body
+    body isa RHT.EmptyBody && return UInt8[]
+    body isa RHT.BytesBody && return body.data
+    throw(ArgumentError("unsupported Reseau request body type `$(typeof(body))` for AWS signing"))
+end
+
 function awssign!(request::HTTP.Request; service=nothing, region=nothing, credentials::Union{Nothing, AWSCredentials}=nothing, x_amz_date=nothing, includeContentSha256=true, debug=false, kw...)
     if debug
         return LoggingExtras.withlevel(Logging.Debug; verbosity=1) do
@@ -316,7 +324,7 @@ function awssign!(request::HTTP.Request; service=nothing, region=nothing, creden
     # determine the service & region for the request (needed for signing)
     serv, reg = urlServiceRegion(request.url.host)
     service = _some(service, serv)
-    service === nothing && ArgumentError("unable to determine AWS service for request; pass `service=X`")
+    service === nothing && throw(ArgumentError("unable to determine AWS service for request; pass `service=X`"))
     region = something(reg, region, get(AWS_CONFIGS, "region", AWS_DEFAULT_REGION))
     @debugv 1 "computed service = `$service`, region = `$region` for aws request"
     # if the credentials is empty, let's assume this is for a public request, so no signing required
@@ -379,6 +387,63 @@ function awssign!(request::HTTP.Request; service=nothing, region=nothing, creden
     return
 end
 
+function awssign!(request::RHT.Request, uri::HTTP.URI; service=nothing, region=nothing, credentials::Union{Nothing, AWSCredentials}=nothing, x_amz_date=nothing, includeContentSha256=true, debug=false, kw...)
+    if debug
+        return LoggingExtras.withlevel(Logging.Debug; verbosity=1) do
+            awssign!(request, uri; service, region, credentials, x_amz_date, includeContentSha256, kw...)
+        end
+    end
+    serv, reg = urlServiceRegion(uri.host)
+    service = _some(service, serv)
+    service === nothing && throw(ArgumentError("unable to determine AWS service for request; pass `service=X`"))
+    region = something(reg, region, get(AWS_CONFIGS, "region", AWS_DEFAULT_REGION))
+    @debugv 1 "computed service = `$service`, region = `$region` for aws request"
+    credentials === nothing && return uri
+    creds = getCredentials(credentials)
+    RHT.removeheader(request.headers, "Authorization")
+    dt = x_amz_date === nothing ? Dates.now(Dates.UTC) : x_amz_date
+    requestDateTime = Dates.format(dt, ISO8601)
+    RHT.setheader(request.headers, "x-amz-date", requestDateTime)
+    if !isempty(creds.session_token)
+        RHT.setheader(request.headers, "x-amz-security-token", creds.session_token)
+    end
+
+    service = lowercase(service)
+    canonicalURI = URIs.normpath((service == "s3" || service == "service") ? uriencode(uri.path, true) : escapepath(uri.path))
+    canonicalQueryString = join((string(uriencode(k), "=", uriencode(v)) for (k, v) in sort!(queryparampairs(uri); by=x->"$(x[1])$(x[2])")), "&")
+    body = _request_body_bytes(request)
+    payloadHash = bytes2hex(sha256(body))
+    if includeContentSha256
+        RHT.setheader(request.headers, "x-amz-content-sha256", payloadHash)
+    end
+    headers = sort!(map(canonicalHeader, request.headers); by=x->x.first)
+    deduplicateHeaders!(headers)
+    canonicalHeaders = join(map(x -> "$(x.first):$(x.second)", headers), "\n")
+    signedHeaders = join(map(first, headers), ";")
+
+    canonicalRequest = """$(request.method)
+    $canonicalURI
+    $canonicalQueryString
+    $canonicalHeaders
+
+    $signedHeaders
+    $payloadHash"""
+    @debugv 1 "computed canonical request = `$canonicalRequest`"
+    hashedCanonicalRequest = bytes2hex(sha256(canonicalRequest))
+    requestDate = Dates.format(dt, ISO8601DATE)
+    credentialScope = "$requestDate/$region/$service/aws4_request"
+    stringToSign = """AWS4-HMAC-SHA256
+    $requestDateTime
+    $credentialScope
+    $hashedCanonicalRequest"""
+    @debugv 1 "computed string to sign = `$stringToSign`"
+    signingKey = hmac_sha256(hmac_sha256(hmac_sha256(hmac_sha256(bytes("AWS4$(creds.secret_access_key)"), requestDate), region), service), "aws4_request")
+    signature = bytes2hex(hmac_sha256(signingKey, stringToSign))
+    header = "AWS4-HMAC-SHA256 Credential=$(creds.access_key_id)/$credentialScope, SignedHeaders=$signedHeaders, Signature=$signature"
+    RHT.setheader(request.headers, "Authorization", header)
+    return uri
+end
+
 function awssignv2!(request::HTTP.Request; credentials::Union{Nothing, AWSCredentials}=nothing, version=nothing, timestamp=nothing, kw...)
     credentials === nothing && return
     if request.method == "GET"
@@ -415,4 +480,44 @@ function awssignv2!(request::HTTP.Request; credentials::Union{Nothing, AWSCreden
         request.body = params
     end
     return
+end
+
+function awssignv2!(request::RHT.Request, uri::HTTP.URI; body_params=nothing, credentials::Union{Nothing, AWSCredentials}=nothing, version=nothing, timestamp=nothing, kw...)
+    credentials === nothing && return uri
+    if request.method == "GET"
+        params = queryparams(uri)
+    else
+        request.method == "POST" || throw(ArgumentError("unsupported method for AWS SigV2 request signing `$(request.method)`"))
+        body_params === nothing && throw(ArgumentError("AWS SigV2 POST request signing requires Dict or NamedTuple body params"))
+        params = Dict{String, Any}(string(k) => v for (k, v) in pairs(body_params))
+    end
+    creds = getCredentials(credentials)
+    params["AWSAccessKeyId"] = creds.access_key_id
+    params["SignatureVersion"] = "2"
+    params["SignatureMethod"] = "HmacSHA256"
+    version === nothing || (params["Version"] = version)
+    params["Timestamp"] = Dates.format(timestamp === nothing ? Dates.now(Dates.UTC) : timestamp, SIG2DFNOZ)
+    if !isempty(creds.session_token)
+        params["SecurityToken"] = creds.session_token
+    end
+    sorted = sort!(collect(params); by=x->x.first)
+    path = isempty(uri.path) ? "/" : String(uri.path)
+    stringToSign = """$(request.method)
+    $(lowercase(uri.host))
+    $path
+    $(HTTP.escapeuri(sorted))"""
+    signature = strip(base64encode(hmac_sha256(bytes(creds.secret_access_key), stringToSign)))
+    if request.method == "GET"
+        push!(sorted, "Signature" => signature)
+        query = HTTP.escapeuri(sorted)
+        request.target = string(path, "?", query)
+        return HTTP.URI(uri; query=query)
+    end
+    params["Signature"] = signature
+    encoded = HTTP.escapeuri(params)
+    body_bytes = Vector{UInt8}(codeunits(encoded))
+    request.body = RHT.BytesBody(body_bytes)
+    request.content_length = Int64(length(body_bytes))
+    RHT.setheader(request.headers, "Content-Length", string(length(body_bytes)))
+    return uri
 end

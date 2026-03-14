@@ -11,6 +11,7 @@ const GCP_DEFAULT_STS_TOKEN_URI = "https://sts.googleapis.com/v1/token"
 const GCP_DEFAULT_METADATA_ROOT = "http://metadata.google.internal"
 const GCP_DEFAULT_SERVICE_ACCOUNT = "default"
 const GCP_METADATA_TOKEN_PATH = "/computeMetadata/v1/instance/service-accounts/{service_account}/token"
+const RHT = Reseau.HTTP
 
 abstract type GCPAuth end
 
@@ -506,4 +507,24 @@ function gcpsign!(request::HTTP.Request; credentials::Union{Nothing, GCPCredenti
         throw(ArgumentError("unsupported GCP credentials type `$(typeof(auth))`"))
     end
     return
+end
+
+function gcpsign!(request::RHT.Request, uri::HTTP.URI; credentials::Union{Nothing, GCPCredentials}=nothing, kw...)
+    credentials === nothing && return uri
+    auth = getCredentials(credentials)
+    if auth isa GCPAccessToken
+        RHT.removeheader(request.headers, "Authorization")
+        RHT.setheader(request.headers, "Authorization", "Bearer $(auth.token)")
+        if !isempty(credentials.quota_project_id)
+            RHT.setheader(request.headers, "x-goog-user-project", credentials.quota_project_id)
+        end
+    elseif auth isa HMACKey
+        if !isempty(credentials.quota_project_id)
+            RHT.setheader(request.headers, "x-amz-project-id", credentials.quota_project_id)
+        end
+        awssign!(request, uri; service=auth.service, region=auth.region, credentials=AWSCredentials(auth.access_id, auth.secret), kw...)
+    else
+        throw(ArgumentError("unsupported GCP credentials type `$(typeof(auth))`"))
+    end
+    return uri
 end

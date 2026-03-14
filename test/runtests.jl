@@ -75,10 +75,25 @@ end
         println("testing AWSSig4 case = $(case.name), i = $i")
         req = HTTP.Request(case.request.method, case.request.path, case.request.headers, case.request.body; url=HTTP.URI(case.request.uri))
         CloudBase.awssign!(req; x_amz_date=DateTime(2015, 8, 30, 12, 36), includeContentSha256=false, debug=debug, configs...)
+        direct_uri = HTTP.URI(case.request.uri)
+        direct_headers = CloudBase.Reseau.HTTP.Headers([String(h[1]) => String(h[2]) for h in case.request.headers])
+        direct_body = isempty(case.request.body) ? CloudBase.Reseau.HTTP.EmptyBody() : CloudBase.Reseau.HTTP.BytesBody(codeunits(String(case.request.body)))
+        direct_len = isempty(case.request.body) ? Int64(0) : Int64(ncodeunits(String(case.request.body)))
+        direct_req = CloudBase.Reseau.HTTP.Request(
+            case.request.method,
+            case.request.path;
+            headers=direct_headers,
+            body=direct_body,
+            host=CloudBase._request_authority(direct_uri),
+            content_length=direct_len,
+        )
+        CloudBase.awssign!(direct_req, direct_uri; x_amz_date=DateTime(2015, 8, 30, 12, 36), includeContentSha256=false, debug=debug, configs...)
         if i in knownFailures
             @test_broken HTTP.header(req, "Authorization") == case.authz
+            @test_broken CloudBase.Reseau.HTTP.header(direct_req.headers, "Authorization") == case.authz
         else
             @test HTTP.header(req, "Authorization") == case.authz
+            @test CloudBase.Reseau.HTTP.header(direct_req.headers, "Authorization") == case.authz
         end
     end
 end
@@ -89,9 +104,29 @@ end
     CloudBase.awssignv2!(req; credentials, timestamp=DateTime(2011, 10, 3, 15, 19, 30), version="2009-03-31")
     @test req.target ==
         "?AWSAccessKeyId=AKIAIOSFODNN7EXAMPLE&Action=DescribeJobFlows&SignatureMethod=HmacSHA256&SignatureVersion=2&Timestamp=2011-10-03T15%3A19%3A30&Version=2009-03-31&Signature=i91nKc4PWAt0JJIdXwz9HxZCJDdiy6cf%2FMj6vPxyYIs%3D"
+    direct_uri = HTTP.URI("https://elasticmapreduce.amazonaws.com?Action=DescribeJobFlows")
+    direct_req = CloudBase.Reseau.HTTP.Request("GET", "/?Action=DescribeJobFlows";
+        headers=CloudBase.Reseau.HTTP.Headers(["Host" => "elasticmapreduce.amazonaws.com"]),
+        body=CloudBase.Reseau.HTTP.EmptyBody(),
+        host="elasticmapreduce.amazonaws.com:443",
+        content_length=Int64(0))
+    direct_uri = CloudBase.awssignv2!(direct_req, direct_uri; credentials, timestamp=DateTime(2011, 10, 3, 15, 19, 30), version="2009-03-31")
+    @test direct_req.target ==
+        "/?AWSAccessKeyId=AKIAIOSFODNN7EXAMPLE&Action=DescribeJobFlows&SignatureMethod=HmacSHA256&SignatureVersion=2&Timestamp=2011-10-03T15%3A19%3A30&Version=2009-03-31&Signature=i91nKc4PWAt0JJIdXwz9HxZCJDdiy6cf%2FMj6vPxyYIs%3D"
+    @test String(direct_uri.query) == "AWSAccessKeyId=AKIAIOSFODNN7EXAMPLE&Action=DescribeJobFlows&SignatureMethod=HmacSHA256&SignatureVersion=2&Timestamp=2011-10-03T15%3A19%3A30&Version=2009-03-31&Signature=i91nKc4PWAt0JJIdXwz9HxZCJDdiy6cf%2FMj6vPxyYIs%3D"
     req = HTTP.Request("POST", "/", [], Dict("Action" => "DescribeJobFlows"); url=HTTP.URI("https://elasticmapreduce.amazonaws.com"))
     CloudBase.awssignv2!(req; credentials, timestamp=DateTime(2011, 10, 3, 15, 19, 30), version="2009-03-31")
     @test req.body["Signature"] == "wseguMzBRgA/4/fan8ZwEa0PIF+ws4WFbTJcG1ts5RY="
+    post_req = CloudBase.Reseau.HTTP.Request("POST", "/";
+        headers=CloudBase.Reseau.HTTP.Headers(["Host" => "elasticmapreduce.amazonaws.com"]),
+        body=CloudBase.Reseau.HTTP.BytesBody(UInt8[]),
+        host="elasticmapreduce.amazonaws.com:443",
+        content_length=Int64(0))
+    CloudBase.awssignv2!(post_req, HTTP.URI("https://elasticmapreduce.amazonaws.com"); body_params=Dict("Action" => "DescribeJobFlows"), credentials, timestamp=DateTime(2011, 10, 3, 15, 19, 30), version="2009-03-31")
+    post_body = String(post_req.body.data)
+    post_params = Dict(HTTP.URIs.queryparampairs(HTTP.URI("http://127.0.0.1/?$post_body")))
+    @test post_params["Signature"] == "wseguMzBRgA/4/fan8ZwEa0PIF+ws4WFbTJcG1ts5RY="
+    @test post_params["Action"] == "DescribeJobFlows"
 end
 
 @time @testset "AWS" begin

@@ -1,4 +1,5 @@
 const AZURE_CONFIGS = Figgy.Store()
+const RHT = Reseau.HTTP
 
 abstract type AzureAuth end
 
@@ -179,6 +180,23 @@ function _append_sas_query!(request::HTTP.Request, creds::SASToken)
     return nothing
 end
 
+function _append_sas_query!(request::RHT.Request, uri::HTTP.URI, creds::SASToken)::HTTP.URI
+    query = String(uri.query)
+    if isempty(query)
+        uri = HTTP.URI(uri; query=creds.token)
+    elseif occursin("sig=", query)
+        merged = URIs.queryparampairs(uri)
+        for pair in creds.pairs
+            HTTP.setbyfirst(merged, pair)
+        end
+        uri = HTTP.URI(uri; query=merged)
+    else
+        uri = HTTP.URI(uri; query=string(query, '&', creds.token))
+    end
+    request.target = HTTP.resource(uri)
+    return uri
+end
+
 function azuresign!(request::HTTP.Request; credentials=nothing, addMd5::Bool=true, kw...)
     # if credentials not provided, assume public access
     credentials === nothing && return
@@ -237,6 +255,50 @@ function azuresign!(request::HTTP.Request; credentials=nothing, addMd5::Bool=tru
     header = "SharedKey $(creds.account):$signature"
     HTTP.setheader(request, "Authorization" => header)
     return
+end
+
+function azuresign!(request::RHT.Request, uri::HTTP.URI; credentials=nothing, addMd5::Bool=true, kw...)
+    credentials === nothing && return uri
+    RHT.removeheader(request.headers, "Authorization")
+    dt = Dates.now(Dates.UTC)
+    requestDateTime = Dates.format(dt, RFC1123Format)
+    RHT.setheader(request.headers, "x-ms-date", requestDateTime)
+    RHT.setheader(request.headers, "x-ms-version", AZURE_API_VERSION)
+    creds = getCredentials(credentials)
+    if creds isa AccessToken
+        RHT.setheader(request.headers, "Authorization", "Bearer $(creds.token)")
+        return uri
+    elseif creds isa SASToken
+        return _append_sas_query!(request, uri, creds)
+    end
+
+    @assert creds isa SharedKey
+    msheaders = filter(x -> startswith(lowercase(x.first), "x-ms-"), request.headers)
+    headers = sort!(map(x -> lowercase(x.first) => trimall2(x.second), msheaders), by=x->x.first)
+    canonicalHeaders = join(map(x -> "$(x.first):$(x.second)", headers), "\n")
+    pairs = sort!(map(x -> lowercase(x.first) => x.second, queryparampairs(uri)), by=x->x.first)
+    canonicalQueryString = combineParams(pairs)
+    path = isempty(uri.path) ? "/" : String(uri.path)
+    canonicalResource = "/$(creds.account)$(path)$canonicalQueryString"
+    len = RHT.header(request.headers, "Content-Length", "")
+    stringToSign = """$(request.method)
+    $(RHT.header(request.headers, "Content-Encoding", ""))
+    $(RHT.header(request.headers, "Content-Language", ""))
+    $(len == "0" ? "" : len)
+    $(RHT.header(request.headers, "Content-MD5", ""))
+    $(RHT.header(request.headers, "Content-Type", ""))
+    
+    $(RHT.header(request.headers, "If-Modified-Since", ""))
+    $(RHT.header(request.headers, "If-Match", ""))
+    $(RHT.header(request.headers, "If-None-Match", ""))
+    $(RHT.header(request.headers, "If-Unmodified-Since", ""))
+    $(RHT.header(request.headers, "Range", ""))
+    $canonicalHeaders
+    $canonicalResource"""
+    signature = base64encode(hmac_sha256(base64decode(creds.key), stringToSign))
+    header = "SharedKey $(creds.account):$signature"
+    RHT.setheader(request.headers, "Authorization", header)
+    return uri
 end
 
 include("azure_sas.jl")

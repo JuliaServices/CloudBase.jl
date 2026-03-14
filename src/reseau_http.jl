@@ -144,6 +144,75 @@ function _request_url(req::HTTP.Request)::String
     return string(String(req.url.scheme), "://", _request_authority(req.url), target)
 end
 
+function _append_query(uri::HTTP.URI, query)::HTTP.URI
+    query_s = _query_string(query)
+    isempty(query_s) && return uri
+    current = String(uri.query)
+    merged = isempty(current) ? query_s : string(current, "&", query_s)
+    return HTTP.URI(uri; query=merged)
+end
+
+function _reseau_headers(headers=nothing)::HT.Headers
+    headers === nothing && return HT.Headers()
+    headers isa HT.Headers && return copy(headers)
+    if headers isa AbstractDict
+        return HT.Headers([string(k) => string(v) for (k, v) in pairs(headers)])
+    end
+    return HT.Headers(headers)
+end
+
+function _request_target(uri::HTTP.URI)::String
+    return isempty(uri.path) && isempty(uri.query) ? "/" : HTTP.resource(uri)
+end
+
+function _prepare_reseau_request_body(body, method::AbstractString; awsv2::Bool=false)
+    body === nothing && return HT.EmptyBody(), Int64(0), nothing, nothing
+    if body isa AbstractVector{UInt8}
+        return HT.BytesBody(body), Int64(length(body)), nothing, nothing
+    elseif body isa AbstractString
+        text = body isa String ? body : String(body)
+        return HT.BytesBody(codeunits(text)), Int64(ncodeunits(text)), nothing, nothing
+    elseif body isa IO
+        bytes = read(body)
+        return HT.BytesBody(bytes), Int64(length(bytes)), nothing, nothing
+    elseif body isa Dict || body isa NamedTuple
+        default_content_type = "application/x-www-form-urlencoded"
+        if awsv2 && method == "POST"
+            params = Dict{String, Any}(string(k) => v for (k, v) in pairs(body))
+            return HT.BytesBody(UInt8[]), Int64(0), params, default_content_type
+        end
+        form = HTTP.escapeuri(body)
+        return HT.BytesBody(codeunits(form)), Int64(ncodeunits(form)), nothing, default_content_type
+    end
+    throw(ArgumentError("unsupported request body type $(typeof(body))"))
+end
+
+function _ensure_reseau_host_header!(req::HT.Request)::HT.Request
+    HT.hasheader(req.headers, "Host") && return req
+    req.host === nothing || HT.setheader(req.headers, "Host", req.host::String)
+    return req
+end
+
+function _ensure_reseau_content_length!(req::HT.Request)::HT.Request
+    HT.hasheader(req.headers, "Content-Length") && return req
+    if req.content_length >= 0
+        HT.setheader(req.headers, "Content-Length", string(req.content_length))
+    elseif req.method == "PUT" || req.method == "POST" || req.method == "PATCH"
+        HT.setheader(req.headers, "Content-Length", "0")
+    end
+    return req
+end
+
+function _request_body_http_value(body::HT.AbstractBody)
+    body isa HT.EmptyBody && return UInt8[]
+    body isa HT.BytesBody && return body.data
+    return UInt8[]
+end
+
+function _http_request_from_reseau(req::HT.Request, uri::HTTP.URI)::HTTP.Request
+    return HTTP.Request(req.method, req.target, _to_http_headers(req.headers), _request_body_http_value(req.body); url=uri)
+end
+
 function _prepare_transport_body!(req::HTTP.Request)
     body = req.body
     if body isa AbstractVector{UInt8}
@@ -280,16 +349,21 @@ function cloudrequest(
     kw...,
 )
     start = time()
-    final_url = _append_query(url, query)
-    req_headers = _headers(headers)
-    req_body = body === nothing ? UInt8[] : body
-    uri = HTTP.URI(final_url)
-    target = isempty(uri.path) && isempty(uri.query) ? "/" : HTTP.resource(uri)
-    req = HTTP.Request(String(method), target, req_headers, req_body; url=uri)
-    awsv2 || _prepare_form_headers!(req)
-    _ensure_host_header!(req)
-    _ensure_content_length!(req)
-    ctx = req.context
+    method_s = uppercase(String(method))
+    uri = _append_query(HTTP.URI(url), query)
+    target = _request_target(uri)
+    authority = _request_authority(uri)
+    secure = String(uri.scheme) == "https"
+    server_name = String(uri.host)
+    req_headers = _reseau_headers(headers)
+    req_body, content_length, sigv2_body_params, default_content_type = _prepare_reseau_request_body(body, method_s; awsv2=awsv2)
+    req = HT.Request(method_s, target; headers=req_headers, body=req_body, host=authority, content_length=content_length)
+    if default_content_type !== nothing && !HT.hasheader(req.headers, "Content-Type")
+        HT.setheader(req.headers, "Content-Type", default_content_type::String)
+    end
+    _ensure_reseau_host_header!(req)
+    _ensure_reseau_content_length!(req)
+    ctx = Dict{Symbol, Any}()
     ctx[:connect_errors] = 0
     ctx[:io_errors] = 0
     ctx[:status_errors] = 0
@@ -298,84 +372,77 @@ function cloudrequest(
     ctx[:read_duration_ms] = 0.0
     ctx[:write_duration_ms] = 0.0
     ctx[:nbytes] = 0
-    ctx[:nbytes_written] = 0
+    ctx[:nbytes_written] = req.content_length
     ctx[:retryattempt] = 0
     PREREQUEST_CALLBACK[](req.method)
     if awsv2
-        awssignv2!(req; credentials, kw...)
+        uri = awssignv2!(req, uri; body_params=sigv2_body_params, credentials, kw...)
     elseif aws
-        awssign!(req; credentials, kw...)
+        uri = awssign!(req, uri; credentials, kw...)
     elseif azure
-        azuresign!(req; credentials, kw...)
+        uri = azuresign!(req, uri; credentials, kw...)
     elseif gcp
-        gcpsign!(req; credentials, kw...)
+        uri = gcpsign!(req, uri; credentials, kw...)
     end
-    request_url = _request_url(req)
-    request_body, nbytes_written = _prepare_transport_body!(req)
-    ctx[:nbytes_written] = nbytes_written
-    request_kwargs = _filter_request_kwargs(kw)
+    ctx[:nbytes_written] = req.content_length
+    readtimeout >= 0 || throw(ArgumentError("readtimeout must be >= 0"))
+    if readtimeout > 0
+        timeout_ns = Int64(round(readtimeout * 1.0e9))
+        HT.set_deadline!(req.context, Int64(time_ns()) + timeout_ns)
+    end
+    http_req = _http_request_from_reseau(req, uri)
     failed = false
     release = pool === nothing ? nothing : () -> Base.release(pool.semaphore)
     pool === nothing || Base.acquire(pool.semaphore)
+    req_client = nothing
+    owns_client = false
     try
-        response = if pool === nothing
-            HT.request(
-                req.method,
-                request_url,
-                req.headers,
-                request_body;
-                status_exception=false,
-                redirect=redirect,
-                redirect_limit=redirect_limit,
-                redirect_method=redirect_method,
-                forwardheaders=forwardheaders,
-                response_stream=response_stream,
-                decompress=decompress,
-                connect_timeout=connect_timeout,
-                readtimeout=readtimeout,
-                require_ssl_verification=require_ssl_verification,
-                protocol=protocol,
-                request_kwargs...,
-            )
+        if pool === nothing
+            req_client, owns_client = HT._client_for_request(nothing; connect_timeout=connect_timeout, require_ssl_verification=require_ssl_verification)
         else
-            HT.request(
-                req.method,
-                request_url,
-                req.headers,
-                request_body;
-                status_exception=false,
-                redirect=redirect,
-                redirect_limit=redirect_limit,
-                redirect_method=redirect_method,
-                forwardheaders=forwardheaders,
-                response_stream=response_stream,
-                decompress=decompress,
-                client=pool.client,
-                readtimeout=readtimeout,
-                protocol=protocol,
-                request_kwargs...,
-            )
+            req_client = pool.client
         end
-        response_body, nbytes = _response_body_and_nbytes(response, response_stream)
+        sink = HT._resolve_response_sink(response_stream, response_stream)
+        redirect_policy = HT._redirect_policy(
+            req_client;
+            redirect_limit=redirect ? redirect_limit : 0,
+            redirect_method=redirect_method,
+            forwardheaders=forwardheaders,
+        )
+        incoming = HT._do_incoming!(
+            req_client,
+            req.host::String,
+            req;
+            secure=secure,
+            server_name=server_name,
+            protocol=protocol,
+            redirect_policy=redirect_policy,
+            proxy_config=req_client.transport.proxy,
+        )
+        final_body, nbytes = HT._consume_incoming_response!(incoming, sink; decompress=decompress)
         ctx[:nbytes] = nbytes
-        http_response = HTTP.Response(response.status_code, _to_http_headers(response.headers), response_body; request=req)
+        response_body = response_stream === nothing ? final_body : UInt8[]
+        http_response = HTTP.Response(incoming.head.status_code, _to_http_headers(incoming.head.headers), response_body; request=http_req)
         if status_exception && http_response.status >= 400
-            err = HTTP.StatusError(http_response.status, req.method, req.target, http_response)
+            err = HTTP.StatusError(http_response.status, http_req.method, http_req.target, http_response)
             _record_error!(ctx, err)
             failed = true
             throw(err)
         end
         return http_response
     catch err
-        wrapped = _wrap_request_error(req, err)
+        wrapped = _wrap_request_error(http_req, err)
         _record_error!(ctx, wrapped)
         failed = true
         throw(wrapped)
     finally
+        if owns_client
+            close(req_client)
+        end
         release === nothing || release()
         dur = (time() - start) * 1000
         if logexceptionalduration > 0 && div(dur, 1000) > logexceptionalduration
-            @warn "Exceptionally long cloud request:" total_duration_ms=dur method=req.method context=req.context
+            @warn "Exceptionally long cloud request:" total_duration_ms=dur method=req.method context=ctx
         end
         METRICS_CALLBACK[](
             req.method,
