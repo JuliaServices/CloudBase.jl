@@ -279,13 +279,13 @@ function CloudPool(limit::Integer; connect_timeout::Real=0, require_ssl_verifica
         max_idle_total=Int(limit),
         idle_timeout_ns=Int64(90_000_000_000),
     )
-    client = HT.Client(transport=transport, prefer_http2=true)
+    client = HT.Client(transport=transport, prefer_http2=false)
     return CloudPool(Int(limit), Base.Semaphore(Int(limit)), client)
 end
 
 function _cloud_client(require_ssl_verification::Bool)::HT.Client
     transport = HT.Transport(tls_config=require_ssl_verification ? nothing : HT_TLS.Config(verify_peer=false))
-    return HT.Client(transport=transport, prefer_http2=true)
+    return HT.Client(transport=transport, prefer_http2=false)
 end
 
 function Base.close(pool::CloudPool)
