@@ -22,10 +22,14 @@ URIs = "5c2747f8-b7ea-4ff2-ba2e-563bfd36b1d4"
 azurite_jll = "d59cea07-7a7b-5018-a298-a103d13afaf6"
 minio_jll = "ad83bbfc-c153-533a-bb97-700a7db721e0"
 
+[sources]
+HTTP = {url = "https://github.com/JuliaWeb/HTTP.jl.git", rev = "codex/http2-native-tls-bench"}
+Reseau = {url = "https://github.com/JuliaServices/Reseau.jl.git", rev = "codex/tls-crypto-phase0"}
+
 [compat]
 Figgy = "1.1"
 FunctionWrappers = "1"
-HTTP = "1"
+HTTP = "2"
 JSON = "1"
 JSON3 = "1"
 LoggingExtras = "0.4, 1"

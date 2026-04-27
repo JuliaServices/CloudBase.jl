@@ -1,5 +1,5 @@
 const AZURE_CONFIGS = Figgy.Store()
-const RHT = Reseau.HTTP
+const RHT = HTTP
 
 abstract type AzureAuth end
 
@@ -176,7 +176,7 @@ function _append_sas_query!(request::HTTP.Request, creds::SASToken)
     else
         request.url = URI(url; query=string(query, '&', creds.token))
     end
-    request.target = HTTP.resource(request.url)
+    request.target = _uri_resource(request.url)
     return nothing
 end
 
@@ -193,7 +193,7 @@ function _append_sas_query!(request::RHT.Request, uri::HTTP.URI, creds::SASToken
     else
         uri = HTTP.URI(uri; query=string(query, '&', creds.token))
     end
-    request.target = HTTP.resource(uri)
+    request.target = _uri_resource(uri)
     return uri
 end
 

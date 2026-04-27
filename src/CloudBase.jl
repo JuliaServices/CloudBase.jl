@@ -4,7 +4,7 @@ export CloudTest
 export CloudPool
 
 using Dates, Base64, Random, Sockets
-using HTTP, URIs, SHA, MD5, LoggingExtras, Figgy, JSON, OpenSSL, Reseau
+using HTTP, URIs, SHA, MD5, LoggingExtras, Figgy, JSON, OpenSSL
 import FunctionWrappers: FunctionWrapper
 
 """

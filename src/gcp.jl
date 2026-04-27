@@ -11,7 +11,7 @@ const GCP_DEFAULT_STS_TOKEN_URI = "https://sts.googleapis.com/v1/token"
 const GCP_DEFAULT_METADATA_ROOT = "http://metadata.google.internal"
 const GCP_DEFAULT_SERVICE_ACCOUNT = "default"
 const GCP_METADATA_TOKEN_PATH = "/computeMetadata/v1/instance/service-accounts/{service_account}/token"
-const RHT = Reseau.HTTP
+const RHT = HTTP
 
 abstract type GCPAuth end
 

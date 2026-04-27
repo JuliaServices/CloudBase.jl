@@ -1,5 +1,5 @@
 const AWS_CONFIGS = Figgy.Store()
-const RHT = Reseau.HTTP
+const RHT = HTTP
 
 mutable struct AWSCredentials <: CloudCredentials
     lock::ReentrantLock

@@ -1,7 +1,5 @@
-const HT = Reseau.HTTP
-const HT_HOST_RESOLVERS = Reseau.HostResolvers
-const HT_IOPOLL = Reseau.IOPoll
-const HT_TLS = Reseau.TLS
+const HT = HTTP
+const HT_TLS = HTTP.TLS
 
 mutable struct CloudPool
     limit::Int
@@ -78,6 +76,15 @@ function _headers(headers=HTTP.Headers())
     return HTTP.Headers(headers)
 end
 
+function _join_host_port(host::AbstractString, port)::String
+    host_s = String(host)
+    port_s = string(port)
+    if startswith(host_s, "[") || !occursin(':', host_s)
+        return string(host_s, ":", port_s)
+    end
+    return string("[", host_s, "]:", port_s)
+end
+
 function _known_body_length(body)
     body isa AbstractVector{UInt8} && return length(body)
     body isa AbstractString && return ncodeunits(body)
@@ -113,7 +120,7 @@ function _ensure_host_header!(req::HTTP.Request)
             HTTP.setheader(req, "Host" => host)
         end
     else
-        HTTP.setheader(req, "Host" => HT_HOST_RESOLVERS.join_host_port(host, String(req.url.port)))
+        HTTP.setheader(req, "Host" => _join_host_port(host, String(req.url.port)))
     end
     return req
 end
@@ -135,7 +142,16 @@ function _request_authority(url::HTTP.URI)::String
         occursin(':', host) && return string("[", host, "]")
         return host
     end
-    return HT_HOST_RESOLVERS.join_host_port(host, String(url.port))
+    return _join_host_port(host, String(url.port))
+end
+
+function _request_address(url::HTTP.URI)::String
+    host = String(url.host)
+    if isempty(url.port)
+        default_port = String(url.scheme) == "https" ? 443 : 80
+        return _join_host_port(host, default_port)
+    end
+    return _join_host_port(host, String(url.port))
 end
 
 function _request_url(req::HTTP.Request)::String
@@ -152,6 +168,13 @@ function _append_query(uri::HTTP.URI, query)::HTTP.URI
     return HTTP.URI(uri; query=merged)
 end
 
+function _uri_resource(uri::HTTP.URI)::String
+    path = isempty(uri.path) ? "/" : String(uri.path)
+    query = String(uri.query)
+    isempty(query) && return path
+    return string(path, "?", query)
+end
+
 function _reseau_headers(headers=nothing)::HT.Headers
     headers === nothing && return HT.Headers()
     headers isa HT.Headers && return copy(headers)
@@ -162,7 +185,7 @@ function _reseau_headers(headers=nothing)::HT.Headers
 end
 
 function _request_target(uri::HTTP.URI)::String
-    return isempty(uri.path) && isempty(uri.query) ? "/" : HTTP.resource(uri)
+    return _uri_resource(uri)
 end
 
 function _prepare_reseau_request_body(body, method::AbstractString; awsv2::Bool=false)
@@ -215,7 +238,11 @@ end
 
 function _prepare_transport_body!(req::HTTP.Request)
     body = req.body
-    if body isa AbstractVector{UInt8}
+    if body isa HT.EmptyBody
+        return UInt8[], Int64(0)
+    elseif body isa HT.BytesBody
+        return body.data, Int64(length(body.data))
+    elseif body isa AbstractVector{UInt8}
         return body, Int64(length(body))
     elseif body isa AbstractString
         return String(body), Int64(ncodeunits(body))
@@ -246,9 +273,7 @@ end
 function CloudPool(limit::Integer; connect_timeout::Real=0, require_ssl_verification::Bool=true)
     limit > 0 || throw(ArgumentError("pool limit must be > 0"))
     connect_timeout >= 0 || throw(ArgumentError("connect_timeout must be >= 0"))
-    timeout_ns = connect_timeout == 0 ? Int64(0) : Int64(round(connect_timeout * 1.0e9))
     transport = HT.Transport(
-        host_resolver=HT_HOST_RESOLVERS.HostResolver(timeout_ns=timeout_ns),
         tls_config=require_ssl_verification ? nothing : HT_TLS.Config(verify_peer=false),
         max_idle_per_host=Int(limit),
         max_idle_total=Int(limit),
@@ -258,25 +283,13 @@ function CloudPool(limit::Integer; connect_timeout::Real=0, require_ssl_verifica
     return CloudPool(Int(limit), Base.Semaphore(Int(limit)), client)
 end
 
-function Base.close(pool::CloudPool)
-    close(pool.client)
-    return nothing
+function _cloud_client(require_ssl_verification::Bool)::HT.Client
+    transport = HT.Transport(tls_config=require_ssl_verification ? nothing : HT_TLS.Config(verify_peer=false))
+    return HT.Client(transport=transport, prefer_http2=false)
 end
 
-function _dns_error(err)
-    if err isa HT_HOST_RESOLVERS.DNSOpError
-        inner = err.err
-        if inner isa HT_HOST_RESOLVERS.AddressError
-            _looks_like_ip_endpoint(inner.addr) && return Base.IOError(inner.err, Base.Libc.EPERM)
-            return Sockets.DNSError(inner.addr, Int32(-1))
-        end
-        addr = string(err.addr)
-        _looks_like_ip_endpoint(addr) && return Base.IOError(addr, Base.Libc.EPERM)
-        return Sockets.DNSError(addr, Int32(-1))
-    elseif err isa HT_HOST_RESOLVERS.AddressError
-        _looks_like_ip_endpoint(err.addr) && return Base.IOError(err.err, Base.Libc.EPERM)
-        return Sockets.DNSError(err.addr, Int32(-1))
-    end
+function Base.close(pool::CloudPool)
+    close(pool.client)
     return nothing
 end
 
@@ -289,37 +302,83 @@ end
 
 function _wrap_request_error(req::HTTP.Request, err)
     err isa HTTP.StatusError && return err
-    err isa HTTP.RequestError && return err
-    err isa HTTP.ConnectError && return err
-    dnserr = _dns_error(err)
-    dnserr !== nothing && return HTTP.ConnectError(string(req.url), dnserr)
-    err isa Sockets.DNSError && return HTTP.ConnectError(string(req.url), err)
-    err isa Base.IOError && return HTTP.ConnectError(string(req.url), err)
-    return HTTP.RequestError(req, err)
+    _ = req
+    return err
 end
 
 function _record_error!(ctx::Dict{Symbol, Any}, err)
     err isa HTTP.StatusError && (ctx[:status_errors] = get(() -> 0, ctx, :status_errors) + 1)
-    err isa HTTP.ConnectError && (ctx[:connect_errors] = get(() -> 0, ctx, :connect_errors) + 1)
-    if err isa HTTP.RequestError
-        inner = err.error
-        if inner isa HT.HTTPTimeoutError || inner isa HT_IOPOLL.DeadlineExceededError
-            ctx[:timeout_errors] = get(() -> 0, ctx, :timeout_errors) + 1
-        elseif inner isa Base.IOError
-            ctx[:io_errors] = get(() -> 0, ctx, :io_errors) + 1
-        end
+    if err isa Sockets.DNSError
+        ctx[:connect_errors] = get(() -> 0, ctx, :connect_errors) + 1
+    elseif err isa HT.HTTPTimeoutError
+        ctx[:timeout_errors] = get(() -> 0, ctx, :timeout_errors) + 1
+    elseif err isa Base.IOError
+        ctx[:io_errors] = get(() -> 0, ctx, :io_errors) + 1
     end
     return nothing
 end
 
-function _response_body_and_nbytes(response, response_stream)
-    if response_stream === nothing
-        body = response.body
-        nbytes = response.content_length >= 0 ? Int(response.content_length) : length(body)
-        return body, nbytes
+function _resolve_response_sink(response_stream)
+    if response_stream === nothing || response_stream isa IO || response_stream isa AbstractVector{UInt8}
+        return response_stream
     end
-    nbytes = response.content_length >= 0 ? Int(response.content_length) : 0
-    return UInt8[], nbytes
+    throw(ArgumentError("unsupported response stream sink $(typeof(response_stream)); expected nothing, IO, or AbstractVector{UInt8}"))
+end
+
+function _copy_body_to_vector!(sink::AbstractVector{UInt8}, body::HT.AbstractBody)::Int64
+    buf = Vector{UInt8}(undef, 64 * 1024)
+    offset = 0
+    while true
+        n = HT.body_read!(body, buf)
+        n == 0 && break
+        offset + n <= length(sink) || throw(ArgumentError("response_stream buffer too small"))
+        copyto!(sink, offset + 1, buf, 1, n)
+        offset += n
+    end
+    return Int64(offset)
+end
+
+function _copy_body_to_io!(sink::IO, body::HT.AbstractBody)::Int64
+    buf = Vector{UInt8}(undef, 64 * 1024)
+    total = Int64(0)
+    while true
+        n = HT.body_read!(body, buf)
+        n == 0 && break
+        write(sink, view(buf, 1:n))
+        total += n
+    end
+    return total
+end
+
+function _read_body_bytes!(body::HT.AbstractBody)::Tuple{Vector{UInt8}, Int64}
+    out = UInt8[]
+    buf = Vector{UInt8}(undef, 64 * 1024)
+    while true
+        n = HT.body_read!(body, buf)
+        n == 0 && break
+        append!(out, view(buf, 1:n))
+    end
+    return out, Int64(length(out))
+end
+
+function _consume_response_body!(response::HT.Response, response_stream)::Tuple{Any, Int64}
+    sink = _resolve_response_sink(response_stream)
+    body = response.body
+    try
+        if sink === nothing
+            return _read_body_bytes!(body)
+        elseif sink isa IO
+            return nothing, _copy_body_to_io!(sink::IO, body)
+        else
+            n = _copy_body_to_vector!(sink::AbstractVector{UInt8}, body)
+            if sink isa Vector{UInt8}
+                return sink::Vector{UInt8}, n
+            end
+            return view(sink::AbstractVector{UInt8}, 1:Int(n)), n
+        end
+    finally
+        HT.body_close!(body)
+    end
 end
 
 function cloudrequest(
@@ -352,6 +411,7 @@ function cloudrequest(
     method_s = uppercase(String(method))
     uri = _append_query(HTTP.URI(url), query)
     target = _request_target(uri)
+    address = _request_address(uri)
     authority = _request_authority(uri)
     secure = String(uri.scheme) == "https"
     server_name = String(uri.host)
@@ -373,7 +433,7 @@ function cloudrequest(
     elseif gcp
         uri = gcpsign!(req, uri; credentials, kw...)
     end
-    http_req = _http_request_from_reseau(req, uri)
+    http_req = req
     ctx = http_req.context
     ctx[:connect_errors] = 0
     ctx[:io_errors] = 0
@@ -386,9 +446,10 @@ function cloudrequest(
     ctx[:nbytes_written] = req.content_length
     ctx[:retryattempt] = 0
     readtimeout >= 0 || throw(ArgumentError("readtimeout must be >= 0"))
+    connect_timeout >= 0 || throw(ArgumentError("connect_timeout must be >= 0"))
     if readtimeout > 0
         timeout_ns = Int64(round(readtimeout * 1.0e9))
-        HT.set_deadline!(req.context, Int64(time_ns()) + timeout_ns)
+        HT.set_deadline!(HT.get_request_context(req), Int64(time_ns()) + timeout_ns)
     end
     failed = false
     release = pool === nothing ? nothing : () -> Base.release(pool.semaphore)
@@ -397,33 +458,43 @@ function cloudrequest(
     owns_client = false
     try
         if pool === nothing
-            req_client, owns_client = HT._client_for_request(nothing; connect_timeout=connect_timeout, require_ssl_verification=require_ssl_verification)
+            req_client = _cloud_client(require_ssl_verification)
+            owns_client = true
         else
             req_client = pool.client
         end
-        sink = HT._resolve_response_sink(response_stream, response_stream)
-        redirect_policy = HT._redirect_policy(
-            req_client;
-            redirect_limit=redirect ? redirect_limit : 0,
-            redirect_method=redirect_method,
-            forwardheaders=forwardheaders,
-        )
-        incoming = HT._do_incoming!(
+        response = HT.do!(
             req_client,
-            req.host::String,
+            address,
             req;
             secure=secure,
             server_name=server_name,
             protocol=protocol,
-            redirect_policy=redirect_policy,
-            proxy_config=req_client.transport.proxy,
+            redirect_limit=redirect ? redirect_limit : 0,
+            redirect_method=redirect_method,
+            forwardheaders=forwardheaders,
         )
-        final_body, nbytes = HT._consume_incoming_response!(incoming, sink; decompress=decompress)
+        if decompress !== false
+            encoding = HT.header(response.headers, "Content-Encoding", nothing)
+            if encoding !== nothing
+                throw(ArgumentError("CloudBase response_stream path does not support HTTP 2.0 body decompression yet"))
+            end
+        end
+        final_body, nbytes = _consume_response_body!(response, response_stream)
         ctx[:nbytes] = nbytes
         response_body = response_stream === nothing ? final_body : UInt8[]
-        http_response = HTTP.Response(incoming.head.status_code, _to_http_headers(incoming.head.headers), response_body; request=http_req)
+        http_response = HTTP.Response(
+            response.status,
+            response_body;
+            headers=_to_http_headers(response.headers),
+            request=http_req,
+            request_url=string(uri),
+            content_length=nbytes,
+            proto_major=response.proto_major,
+            proto_minor=response.proto_minor,
+        )
         if status_exception && http_response.status >= 400
-            err = HTTP.StatusError(http_response.status, http_req.method, http_req.target, http_response)
+            err = HTTP.StatusError(http_response)
             _record_error!(ctx, err)
             failed = true
             throw(err)
