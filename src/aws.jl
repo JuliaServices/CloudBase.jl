@@ -312,7 +312,7 @@ end
 # is not hot enough for the alias to be worth the hazard.
 bytes(x::String) = Vector{UInt8}(codeunits(x))
 trimall(x) = strip(replace(x, r"[ ]{2,}" => " "))
-canonicalHeader(x::HTTP.Header) = strip(lowercase(x.first)) => trimall(x.second)
+canonicalHeader(x::Pair) = strip(lowercase(x.first)) => trimall(x.second)
 const ISO8601 = dateformat"yyyymmdd\THHMMSS\Z"
 const ISO8601DATE = dateformat"yyyymmdd"
 const SIG2DF = dateformat"yyyy-mm-dd\THH:MM:SS\Z"
@@ -336,6 +336,23 @@ function canonicalQuery(url)
     return join((string(k, "=", v) for (k, v) in encoded), "&")
 end
 
+function canonicalRequestHeaders(request, url)
+    headers = map(canonicalHeader, request.headers)
+    if !any(x -> x.first == "host", headers)
+        host = if request.host !== nothing
+            request.host
+        elseif isempty(url.port)
+            url.host
+        else
+            "$(url.host):$(url.port)"
+        end
+        push!(headers, "host" => String(host))
+    end
+    sort!(headers; by=x -> x.first)
+    deduplicateHeaders!(headers)
+    return headers
+end
+
 function deduplicateHeaders!(headers)
     isempty(headers) && return
     j = 1
@@ -355,18 +372,18 @@ function deduplicateHeaders!(headers)
     return
 end
 
-function awssign!(request::HTTP.Request; service=nothing, region=nothing, credentials::Union{Nothing, AWSCredentials}=nothing, x_amz_date=nothing, includeContentSha256=true, debug=false, kw...)
+function awssign!(request::HTTP.Request, url::URI; service=nothing, region=nothing, credentials::Union{Nothing, AWSCredentials}=nothing, x_amz_date=nothing, includeContentSha256=true, debug=false, kw...)
     if debug
         return LoggingExtras.withlevel(Logging.Debug; verbosity=1) do
-            awssign!(request; service, region, credentials, x_amz_date, includeContentSha256, kw...)
+            awssign!(request, url; service, region, credentials, x_amz_date, includeContentSha256, kw...)
         end
     end
     # An absent credential object denotes an intentionally public request.
     credentials === nothing && return
     # determine the service & region for the request (needed for signing)
-    serv, reg = urlServiceRegion(request.url.host)
+    serv, reg = urlServiceRegion(url.host)
     service = _some(service, serv)
-    service === nothing && throw(ArgumentError("unable to determine AWS service for request from host `$(request.url.host)`; pass `service=X`"))
+    service === nothing && throw(ArgumentError("unable to determine AWS service for request from host `$(url.host)`; pass `service=X`"))
     region = something(reg, region, get(AWS_CONFIGS, "region", AWS_DEFAULT_REGION))
     @debugv 1 "computed service = `$service`, region = `$region` for aws request"
     # determine credentials
@@ -383,7 +400,7 @@ function awssign!(request::HTTP.Request; service=nothing, region=nothing, creden
     # https://docs.aws.amazon.com/general/latest/gr/sigv4_signing.html
     # Task 1: Create a canonical request for Signature Version 4
     service = lowercase(service)
-    request_path = isempty(request.url.path) ? "/" : request.url.path
+    request_path = isempty(url.path) ? "/" : url.path
     canonicalURI = if service == "s3"
         # S3 object keys may contain repeated slashes and dot segments; normalizing
         # them signs a different object than the one the caller requested.
@@ -393,15 +410,13 @@ function awssign!(request::HTTP.Request; service=nothing, region=nothing, creden
     end
     # @show canonicalURI
     # SigV4 sorts the encoded parameter names and values, not their raw forms.
-    canonicalQueryString = canonicalQuery(request.url)
-    # @show request.url, queryparampairs(request.url), canonicalQueryString
-    headers = sort!(map(canonicalHeader, request.headers); by=x->x.first)
-    deduplicateHeaders!(headers)
+    canonicalQueryString = canonicalQuery(url)
+    # @show url, queryparampairs(url), canonicalQueryString
+    headers = canonicalRequestHeaders(request, url)
     # @show headers
     canonicalHeaders = join(map(x -> "$(x.first):$(x.second)", headers), "\n")
     signedHeaders = join(map(first, headers), ";")
-    @assert HTTP.isbytes(request.body) || request.body isa Union{Dict, NamedTuple}
-    body = HTTP.isbytes(request.body) ? request.body : HTTP.escapeuri(request.body)
+    body = requestbodybytes(request)
     #TODO: handle streaming request bodies?
     payloadHash = bytes2hex(sha256(body))
     if includeContentSha256
@@ -435,14 +450,13 @@ function awssign!(request::HTTP.Request; service=nothing, region=nothing, creden
     return
 end
 
-function awssignv2!(request::HTTP.Request; credentials::Union{Nothing, AWSCredentials}=nothing, version=nothing, timestamp=nothing, kw...)
+function awssignv2!(request::HTTP.Request, url::URI; credentials::Union{Nothing, AWSCredentials}=nothing, version=nothing, timestamp=nothing, kw...)
     credentials === nothing && return
     if request.method == "GET"
-        params = queryparams(request.url)
+        params = queryparams(url)
     else
         request.method == "POST" || throw(ArgumentError("unsupported method for AWS SigV2 request signing `$(request.method)`"))
-        request.body isa Dict || request.body isa NamedTuple || throw(ArgumentError("AWS SigV2 POST request signing requires a Dict or NamedTuple request body"))
-        params = Dict(string(k) => v for (k, v) in pairs(request.body))
+        params = queryparams(HTTP.URI("?" * String(copy(requestbodybytes(request)))))
     end
     # determine credentials
     creds = getCredentials(credentials)
@@ -459,16 +473,18 @@ function awssignv2!(request::HTTP.Request; credentials::Union{Nothing, AWSCreden
     end
     sorted = sort!(collect(params); by=x->x.first)
     stringToSign = """$(request.method)
-    $(lowercase(request.url.host))
-    $(isempty(request.url.path) ? "/" : request.url.path)
+    $(lowercase(url.host))
+    $(isempty(url.path) ? "/" : url.path)
     $(HTTP.escapeuri(sorted))"""
     signature = strip(base64encode(hmac_sha256(bytes(creds.secret_access_key), stringToSign)))
     if request.method == "GET"
         push!(sorted, "Signature" => signature)
-        request.target = request.url.path * "?" * HTTP.escapeuri(sorted)
+        request.target = (isempty(url.path) ? "/" : url.path) * "?" * HTTP.escapeuri(sorted)
     else
         params["Signature"] = signature
-        request.body = params
+        # HTTP 2 parameterises Request on its body type, so the body cannot be replaced
+        # in place. Return the signed form-encoded body for the caller to send.
+        return HTTP.escapeuri(params)
     end
-    return
+    return nothing
 end

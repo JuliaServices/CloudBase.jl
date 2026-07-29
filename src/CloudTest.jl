@@ -387,7 +387,7 @@ function run(; dir=nothing, container=nothing, public=false, startupDelay=0.5, d
                     # Process might already be dead
                 end
             else
-                @error "Azurite failed after $max_retries attempts"
+                @error "Azurite failed after $restartAttempts attempts"
                 rethrow(e)
             end
         end
@@ -413,7 +413,7 @@ const RESP = """
 # utility for mocking an AWS ECS task
 function with(f)
     ENV["AWS_CONTAINER_CREDENTIALS_RELATIVE_URI"] = ":50396/credentials"
-    server = HTTP.serve!(50396) do req
+    server = HTTP.serve!("127.0.0.1", 50396) do req
         if req.method == "GET" && req.target == "/credentials"
             return HTTP.Response(200, RESP)
         else
@@ -445,7 +445,7 @@ const RESP = """
 
 # utility for mocking an AWS EC2 task
 function with(f)
-    server = HTTP.serve!(50397) do req
+    server = HTTP.serve!("127.0.0.1", 50397) do req
         if req.method == "GET" && req.target == "/latest/meta-data/iam/security-credentials/"
             return HTTP.Response(200, "testRole")
         elseif req.method == "GET" && req.target == "/latest/meta-data/iam/security-credentials/testRole"
@@ -482,7 +482,7 @@ const RESP = """
 
 # utility for mocking an AzureVM
 function with(f)
-    server = HTTP.serve!(50398) do req
+    server = HTTP.serve!("127.0.0.1", 50398) do req
         if req.method == "GET" && startswith(req.target, "/metadata/identity/oauth2/token?")
             uri = HTTP.URI(req.target)
             params = Dict(URIs.queryparampairs(uri))
@@ -515,7 +515,7 @@ const RESP = """
 }"""
 
 function with(f; port=50399, response::AbstractString=RESP, request_ref=nothing, request_count=Ref(0))
-    server = HTTP.serve!(port) do req
+    server = HTTP.serve!("127.0.0.1", port) do req
         if req.method == "POST" && req.target == "/token"
             request_count[] += 1
             request_ref === nothing || (request_ref[] = (method=req.method, target=req.target, headers=copy(req.headers), body=String(req.body)))
@@ -545,7 +545,7 @@ const RESP = """
 }"""
 
 function with(f; port=50400, response::AbstractString=RESP, request_ref=nothing, request_count=Ref(0))
-    server = HTTP.serve!(port) do req
+    server = HTTP.serve!("127.0.0.1", port) do req
         if req.method == "GET" && startswith(req.target, "/computeMetadata/v1/instance/service-accounts/") && endswith(req.target, "/token")
             @assert HTTP.header(req, "Metadata-Flavor") == "Google"
             request_count[] += 1
@@ -577,7 +577,7 @@ const RESP = """
 }"""
 
 function with(f; port=50401, response::AbstractString=RESP, request_ref=nothing, request_count=Ref(0))
-    server = HTTP.serve!(port) do req
+    server = HTTP.serve!("127.0.0.1", port) do req
         if req.method == "POST" && req.target == "/v1/token"
             request_count[] += 1
             request_ref === nothing || (request_ref[] = (method=req.method, target=req.target, headers=copy(req.headers), body=String(req.body)))
@@ -606,7 +606,7 @@ const RESP = """
 }"""
 
 function with(f; port=50402, response::AbstractString=RESP, request_ref=nothing, request_count=Ref(0))
-    server = HTTP.serve!(port) do req
+    server = HTTP.serve!("127.0.0.1", port) do req
         if req.method == "POST" && occursin(":generateAccessToken", req.target)
             request_count[] += 1
             request_ref === nothing || (request_ref[] = (method=req.method, target=req.target, headers=copy(req.headers), body=String(req.body)))

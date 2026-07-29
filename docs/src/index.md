@@ -17,6 +17,12 @@ using CloudBase
 ```
 to load the package.
 
+CloudBase requires Julia 1.10 or later and HTTP.jl 2.6 or later. Authenticated
+requests use HTTP/1.1 by default because HTTP.jl 2.6 does not preserve
+trace-time signing changes when automatic HTTP/2 negotiation falls back to
+HTTP/1.1. You can pass `protocol=:h2` when the target endpoint supports HTTP/2.
+Public requests keep HTTP.jl's automatic protocol selection.
+
 ## Overview 
 
 The CloudBase.jl package provides a set of foundational functionality for interacting with the most common
