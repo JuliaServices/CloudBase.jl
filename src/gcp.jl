@@ -488,7 +488,7 @@ function reloadGCECredentials!(root=nothing; service_account::String=GCP_DEFAULT
     return credentials
 end
 
-function gcpsign!(request::HTTP.Request; credentials::Union{Nothing, GCPCredentials}=nothing, kw...)
+function gcpsign!(request::HTTP.Request, url::URI; credentials::Union{Nothing, GCPCredentials}=nothing, kw...)
     credentials === nothing && return
     auth = getCredentials(credentials)
     if auth isa GCPAccessToken
@@ -501,7 +501,7 @@ function gcpsign!(request::HTTP.Request; credentials::Union{Nothing, GCPCredenti
         if !isempty(credentials.quota_project_id)
             HTTP.setheader(request, "x-amz-project-id" => credentials.quota_project_id)
         end
-        awssign!(request; service=auth.service, region=auth.region, credentials=AWSCredentials(auth.access_id, auth.secret), kw...)
+        awssign!(request, url; service=auth.service, region=auth.region, credentials=AWSCredentials(auth.access_id, auth.secret), kw...)
     else
         throw(ArgumentError("unsupported GCP credentials type `$(typeof(auth))`"))
     end

@@ -64,8 +64,9 @@ end
     knownFailures = (19, 20, 26)
     for (i, case) in enumerate(cases.tests.all)
         println("testing AWSSig4 case = $(case.name), i = $i")
-        req = HTTP.Request(case.request.method, case.request.path, case.request.headers, case.request.body; url=HTTP.URI(case.request.uri))
-        CloudBase.awssign!(req; x_amz_date=DateTime(2015, 8, 30, 12, 36), includeContentSha256=false, debug=debug, configs...)
+        hdrs = Pair{String,String}[String(h[1]) => String(h[2]) for h in case.request.headers]
+        req = HTTP.Request(case.request.method, case.request.path, hdrs, case.request.body)
+        CloudBase.awssign!(req, HTTP.URI(case.request.uri); x_amz_date=DateTime(2015, 8, 30, 12, 36), includeContentSha256=false, debug=debug, configs...)
         if i in knownFailures
             @test_broken HTTP.header(req, "Authorization") == case.authz
         else
@@ -75,14 +76,57 @@ end
 end
 
 @testset "AWSSigV2" begin
-    req = HTTP.Request("GET", "/?Action=DescribeJobFlows"; url=HTTP.URI("https://elasticmapreduce.amazonaws.com?Action=DescribeJobFlows"))
+    req = HTTP.Request("GET", "/?Action=DescribeJobFlows")
     credentials = CloudBase.AWSCredentials("AKIAIOSFODNN7EXAMPLE", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY")
-    CloudBase.awssignv2!(req; credentials, timestamp=DateTime(2011, 10, 3, 15, 19, 30), version="2009-03-31")
+    CloudBase.awssignv2!(req, HTTP.URI("https://elasticmapreduce.amazonaws.com?Action=DescribeJobFlows"); credentials, timestamp=DateTime(2011, 10, 3, 15, 19, 30), version="2009-03-31")
+    # origin-form request targets must carry a path; HTTP 1 emitted a bare "?query"
     @test req.target ==
-        "?AWSAccessKeyId=AKIAIOSFODNN7EXAMPLE&Action=DescribeJobFlows&SignatureMethod=HmacSHA256&SignatureVersion=2&Timestamp=2011-10-03T15%3A19%3A30&Version=2009-03-31&Signature=i91nKc4PWAt0JJIdXwz9HxZCJDdiy6cf%2FMj6vPxyYIs%3D"
-    req = HTTP.Request("POST", "/", [], Dict("Action" => "DescribeJobFlows"); url=HTTP.URI("https://elasticmapreduce.amazonaws.com"))
-    CloudBase.awssignv2!(req; credentials, timestamp=DateTime(2011, 10, 3, 15, 19, 30), version="2009-03-31")
-    @test req.body["Signature"] == "wseguMzBRgA/4/fan8ZwEa0PIF+ws4WFbTJcG1ts5RY="
+        "/?AWSAccessKeyId=AKIAIOSFODNN7EXAMPLE&Action=DescribeJobFlows&SignatureMethod=HmacSHA256&SignatureVersion=2&Timestamp=2011-10-03T15%3A19%3A30&Version=2009-03-31&Signature=i91nKc4PWAt0JJIdXwz9HxZCJDdiy6cf%2FMj6vPxyYIs%3D"
+    req = HTTP.Request("POST", "/", Pair{String,String}[], HTTP.escapeuri(Dict("Action" => "DescribeJobFlows")))
+    signed_body = CloudBase.awssignv2!(req, HTTP.URI("https://elasticmapreduce.amazonaws.com"); credentials, timestamp=DateTime(2011, 10, 3, 15, 19, 30), version="2009-03-31")
+    signed = HTTP.URIs.queryparams(HTTP.URI("?" * signed_body))
+    @test signed["Signature"] == "wseguMzBRgA/4/fan8ZwEa0PIF+ws4WFbTJcG1ts5RY="
+end
+
+@testset "AWSSigV2 client" begin
+    port, socket = Sockets.listenany(IPv4(0), rand(RandomDevice(), 10000:50000))
+    close(socket)
+    requests = Channel{Any}(2)
+    server = HTTP.serve!("127.0.0.1", port) do request
+        put!(requests, (target=request.target, body=String(request.body)))
+        return HTTP.Response(200, "ok")
+    end
+    credentials = CloudBase.AWSCredentials("AKIAIOSFODNN7EXAMPLE", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY")
+    timestamp = DateTime(2011, 10, 3, 15, 19, 30)
+    try
+        AWS.get(
+            "http://127.0.0.1:$port/?Action=DescribeJobFlows";
+            credentials,
+            awsv2=true,
+            timestamp,
+            version="2009-03-31",
+        )
+        get_request = take!(requests)
+        get_params = Dict(URIs.queryparampairs(URIs.URI(get_request.target)))
+        @test get_params["Action"] == "DescribeJobFlows"
+        @test haskey(get_params, "Signature")
+
+        AWS.post(
+            "http://127.0.0.1:$port/",
+            [],
+            Dict("Action" => "DescribeJobFlows");
+            credentials,
+            awsv2=true,
+            timestamp,
+            version="2009-03-31",
+        )
+        post_request = take!(requests)
+        post_params = Dict(URIs.queryparampairs(URIs.URI("?" * post_request.body)))
+        @test post_params["Action"] == "DescribeJobFlows"
+        @test haskey(post_params, "Signature")
+    finally
+        close(server)
+    end
 end
 
 @time @testset "AWS" begin
@@ -219,14 +263,14 @@ end
 
 @testset "GCP Access Token" begin
     creds = GCP.Credentials("TEST_TOKEN")
-    req = HTTP.Request("GET", "/test"; url=HTTP.URI("https://storage.googleapis.com/test-bucket/test"))
-    CloudBase.gcpsign!(req; credentials=creds)
+    req = HTTP.Request("GET", "/test")
+    CloudBase.gcpsign!(req, HTTP.URI("https://storage.googleapis.com/test-bucket/test"); credentials=creds)
     @test HTTP.header(req, "Authorization") == "Bearer TEST_TOKEN"
 
     port, socket = Sockets.listenany(IPv4(0), rand(RandomDevice(), 10000:50000))
     close(socket)
     auth_headers = Channel{String}(2)
-    server = HTTP.serve!(ip"127.0.0.1", port) do request
+    server = HTTP.serve!("127.0.0.1", port) do request
         put!(auth_headers, HTTP.header(request, "Authorization"))
         return HTTP.Response(200, "ok")
     end
@@ -238,6 +282,66 @@ end
         resp = GCP.get("http://127.0.0.1:$port/public")
         @test resp.status == 200
         @test take!(auth_headers) == ""
+    finally
+        close(server)
+    end
+end
+
+@testset "Authenticated cloud open" begin
+    port, socket = Sockets.listenany(IPv4(0), rand(RandomDevice(), 10000:50000))
+    close(socket)
+    requests = Channel{Any}(3)
+    server = HTTP.serve!("127.0.0.1", port) do request
+        put!(requests, copy(request.headers))
+        return HTTP.Response(200, "ok")
+    end
+    aws_credentials = AWS.Credentials("AWS_ACCESS_ID", "AWS_SECRET")
+    azure_credentials = Azure.Credentials(
+        "devstoreaccount1",
+        "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==",
+    )
+    gcp_credentials = GCP.Credentials("GCP_ACCESS_TOKEN")
+    try
+        aws_body = Ref("")
+        aws_response = AWS.open(
+            "GET",
+            "http://127.0.0.1:$port/aws";
+            credentials=aws_credentials,
+            service="s3",
+            region="us-east-1",
+        ) do stream
+            aws_body[] = String(read(stream))
+        end
+        @test aws_response.status == 200
+        @test aws_body[] == "ok"
+        @test startswith(HTTP.header(take!(requests), "Authorization"), "AWS4-HMAC-SHA256")
+
+        azure_response = Azure.open(
+            "HEAD",
+            "http://127.0.0.1:$port/devstoreaccount1/container";
+            credentials=azure_credentials,
+        ) do stream
+            @test isempty(read(stream))
+        end
+        @test azure_response.status == 200
+        @test startswith(HTTP.header(take!(requests), "Authorization"), "SharedKey devstoreaccount1:")
+
+        gcp_response = GCP.open(
+            "GET",
+            "http://127.0.0.1:$port/gcp";
+            credentials=gcp_credentials,
+        ) do stream
+            @test String(read(stream)) == "ok"
+        end
+        @test gcp_response.status == 200
+        @test HTTP.header(take!(requests), "Authorization") == "Bearer GCP_ACCESS_TOKEN"
+
+        @test_throws ArgumentError AWS.open(
+            "PUT",
+            "http://127.0.0.1:$port/unsupported";
+            credentials=aws_credentials,
+            service="s3",
+        )
     finally
         close(server)
     end
@@ -331,8 +435,8 @@ end
             @test params["client_secret"] == "authorized-client-secret"
             @test params["refresh_token"] == "authorized-refresh-token"
 
-            req = HTTP.Request("GET", "/test"; url=HTTP.URI("https://storage.googleapis.com/test-bucket/test"))
-            CloudBase.gcpsign!(req; credentials=creds)
+            req = HTTP.Request("GET", "/test")
+            CloudBase.gcpsign!(req, HTTP.URI("https://storage.googleapis.com/test-bucket/test"); credentials=creds)
             @test HTTP.header(req, "Authorization") == "Bearer GCP_AUTHORIZED_USER_TOKEN"
             @test HTTP.header(req, "x-goog-user-project") == "billing-project"
         finally
@@ -387,8 +491,8 @@ end
                 @test impersonation_payload["scope"] == CloudBase.GCP_DEFAULT_SCOPES
                 @test impersonation_payload["lifetime"] == "1800s"
 
-                req = HTTP.Request("GET", "/test"; url=HTTP.URI("https://storage.googleapis.com/test-bucket/test"))
-                CloudBase.gcpsign!(req; credentials=creds)
+                req = HTTP.Request("GET", "/test")
+                CloudBase.gcpsign!(req, HTTP.URI("https://storage.googleapis.com/test-bucket/test"); credentials=creds)
                 @test HTTP.header(req, "x-goog-user-project") == "external-billing-project"
             end
         end
@@ -406,7 +510,7 @@ end
     )), request_ref=sts_request_ref) do sts_request_count
         port, socket = Sockets.listenany(IPv4(0), rand(RandomDevice(), 10000:50000))
         close(socket)
-        server = HTTP.serve!(ip"127.0.0.1", port) do request
+        server = HTTP.serve!("127.0.0.1", port) do request
             source_request_ref[] = (method=request.method, target=request.target, headers=copy(request.headers), body=String(request.body))
             return HTTP.Response(200, "URL_SUBJECT_TOKEN")
         end
@@ -445,14 +549,12 @@ end
 
     creds = GCP.Credentials("HMAC_ACCESS_ID", "HMAC_SECRET"; quota_project_id="test-project")
     request_time = DateTime(2026, 1, 2, 3, 4, 5)
-    req = HTTP.Request("PUT", "/test-bucket/test-object", ["Content-Type" => "text/plain"], "hello";
-        url=HTTP.URI("https://storage.googleapis.com/test-bucket/test-object"))
-    expected = HTTP.Request("PUT", "/test-bucket/test-object", ["Content-Type" => "text/plain"], "hello";
-        url=HTTP.URI("https://storage.googleapis.com/test-bucket/test-object"))
+    req = HTTP.Request("PUT", "/test-bucket/test-object", ["Content-Type" => "text/plain"], "hello")
+    expected = HTTP.Request("PUT", "/test-bucket/test-object", ["Content-Type" => "text/plain"], "hello")
 
-    CloudBase.gcpsign!(req; credentials=creds, x_amz_date=request_time)
+    CloudBase.gcpsign!(req, HTTP.URI("https://storage.googleapis.com/test-bucket/test-object"); credentials=creds, x_amz_date=request_time)
     HTTP.setheader(expected, "x-amz-project-id" => "test-project")
-    CloudBase.awssign!(expected; service="s3", region="us-east-1", credentials=CloudBase.AWSCredentials("HMAC_ACCESS_ID", "HMAC_SECRET"), x_amz_date=request_time)
+    CloudBase.awssign!(expected, HTTP.URI("https://storage.googleapis.com/test-bucket/test-object"); service="s3", region="us-east-1", credentials=CloudBase.AWSCredentials("HMAC_ACCESS_ID", "HMAC_SECRET"), x_amz_date=request_time)
 
     @test HTTP.header(req, "Authorization") == HTTP.header(expected, "Authorization")
     @test HTTP.header(req, "x-amz-date") == HTTP.header(expected, "x-amz-date")
@@ -462,7 +564,7 @@ end
     port, socket = Sockets.listenany(IPv4(0), rand(RandomDevice(), 10000:50000))
     close(socket)
     request_ref = Ref{Any}()
-    server = HTTP.serve!(ip"127.0.0.1", port) do request
+    server = HTTP.serve!("127.0.0.1", port) do request
         request_ref[] = (method=request.method, target=request.target, headers=copy(request.headers), body=String(request.body))
         return HTTP.Response(200, "ok")
     end
@@ -471,7 +573,7 @@ end
         @test resp.status == 200
         headers = headerdict(request_ref[].headers)
         @test startswith(headers["Authorization"], "AWS4-HMAC-SHA256 Credential=HMAC_ACCESS_ID/")
-        @test headers["x-amz-project-id"] == "test-project"
+        @test headers["X-Amz-Project-Id"] == "test-project"
     finally
         close(server)
     end
@@ -554,7 +656,7 @@ end
         catch e
             ex = e
         end
-        params = HTTP.URIs.queryparampairs(HTTP.URI(ex.target).query)
+        params = HTTP.URIs.queryparampairs(HTTP.URI(ex.response.request.target).query)
         @test count(x -> x[1] == "sig", params) == 1
     end
 end
@@ -564,16 +666,34 @@ end
     Minio.with(bindIP="127.0.0.1", startupDelay=0.5) do conf
         credentials, bucket = conf
         prereq_ref = Ref(0)
-        metrics_ref = Ref{Any}()
-        CloudBase.PREREQUEST_CALLBACK[] = (m) -> prereq_ref[] += 1
-        CloudBase.METRICS_CALLBACK[] = (args...) -> metrics_ref[] = args
-        csv = "a,b,c\n1,2,3\n4,5,$(rand())"
-        AWS.put("$(bucket.baseurl)test.csv", [], csv; service="s3", credentials)
-        @test prereq_ref[] == 1
-        @test metrics_ref[] isa Tuple
-        resp = AWS.get("$(bucket.baseurl)test.csv"; service="s3", credentials)
-        @test String(resp.body) == csv
-        @test prereq_ref[] == 2
+        metric_calls = Any[]
+        old_prerequest = CloudBase.PREREQUEST_CALLBACK[]
+        old_metrics = CloudBase.METRICS_CALLBACK[]
+        try
+            CloudBase.PREREQUEST_CALLBACK[] = (m) -> prereq_ref[] += 1
+            CloudBase.METRICS_CALLBACK[] = (args...) -> push!(metric_calls, args)
+            csv = "a,b,c\n1,2,3\n4,5,$(rand())"
+            AWS.put("$(bucket.baseurl)test.csv", [], csv; service="s3", credentials)
+            @test prereq_ref[] == 1
+            @test length(metric_calls) == 1
+            @test length(only(metric_calls)) == 13
+            resp = AWS.get("$(bucket.baseurl)test.csv"; service="s3", credentials)
+            @test String(resp.body) == csv
+            @test prereq_ref[] == 2
+            @test length(metric_calls) == 2
+
+            streamed = Ref("")
+            AWS.open("GET", "$(bucket.baseurl)test.csv"; service="s3", credentials) do stream
+                streamed[] = String(read(stream))
+            end
+            @test streamed[] == csv
+            @test prereq_ref[] == 3
+            @test length(metric_calls) == 3
+            @test all(call -> length(call) == 13, metric_calls)
+        finally
+            CloudBase.PREREQUEST_CALLBACK[] = old_prerequest
+            CloudBase.METRICS_CALLBACK[] = old_metrics
+        end
     end
 end
 
@@ -665,14 +785,23 @@ end
 @testset "AWSSigV4 signing edge cases" begin
     creds = CloudBase.AWSCredentials("AKIAIOSFODNN7EXAMPLE", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY")
     mkreq(url; method="GET") = begin
-        r = HTTP.Request(method, url, HTTP.Header[], UInt8[])
-        r.url = HTTP.URI(url)
-        r
+        uri = HTTP.URI(url)
+        host = isempty(uri.port) ? String(uri.host) : "$(uri.host):$(uri.port)"
+        path = isempty(uri.path) ? "/" : String(uri.path)
+        target = isempty(uri.query) ? path : "$path?$(uri.query)"
+        return HTTP.Request(
+            method,
+            target;
+            headers=Pair{String,String}[],
+            body=UInt8[],
+            host,
+        )
     end
+    signreq!(request, url; kw...) = CloudBase.awssign!(request, HTTP.URI(url); kw...)
 
     # a host we cannot derive a service from must say so, not fail later inside signing
     err = try
-        CloudBase.awssign!(mkreq("https://example.com/path"); credentials=creds)
+        signreq!(mkreq("https://example.com/path"), "https://example.com/path"; credentials=creds)
     catch e
         e
     end
@@ -680,16 +809,17 @@ end
     @test occursin("unable to determine AWS service", err.msg)
     # public requests do not require endpoint inference because they are not signed
     public_request = mkreq("https://example.com/path")
-    @test CloudBase.awssign!(public_request) === nothing
+    @test signreq!(public_request, "https://example.com/path") === nothing
     @test isempty(HTTP.header(public_request, "Authorization"))
     # ...and passing service explicitly works
     r = mkreq("https://example.com/path")
-    CloudBase.awssign!(r; credentials=creds, service="s3", region="us-east-1")
+    signreq!(r, "https://example.com/path"; credentials=creds, service="s3", region="us-east-1")
     @test occursin("AWS4-HMAC-SHA256", HTTP.header(r, "Authorization"))
+    @test occursin("SignedHeaders=host;x-amz-date", HTTP.header(r, "Authorization"))
 
     # debug=true previously referenced undefined variables
     r = mkreq("https://s3.us-west-2.amazonaws.com/b/k")
-    CloudBase.awssign!(r; credentials=creds, debug=true)
+    signreq!(r, "https://s3.us-west-2.amazonaws.com/b/k"; credentials=creds, debug=true)
     @test occursin("Credential=AKIAIOSFODNN7EXAMPLE/", HTTP.header(r, "Authorization"))
 
     # canonical query params sort by (name, value), not by their concatenation:
@@ -697,8 +827,8 @@ end
     r1 = mkreq("https://s3.us-west-2.amazonaws.com/b/k?ab=c&a=bc")
     r2 = mkreq("https://s3.us-west-2.amazonaws.com/b/k?a=bc&ab=c")
     dt = DateTime(2024, 1, 1)
-    CloudBase.awssign!(r1; credentials=creds, x_amz_date=dt)
-    CloudBase.awssign!(r2; credentials=creds, x_amz_date=dt)
+    signreq!(r1, "https://s3.us-west-2.amazonaws.com/b/k?ab=c&a=bc"; credentials=creds, x_amz_date=dt)
+    signreq!(r2, "https://s3.us-west-2.amazonaws.com/b/k?a=bc&ab=c"; credentials=creds, x_amz_date=dt)
     # the same query set in either order must produce the same signature
     @test HTTP.header(r1, "Authorization") == HTTP.header(r2, "Authorization")
 
@@ -710,21 +840,21 @@ end
     # signing is deterministic for a fixed timestamp
     a = mkreq("https://s3.us-west-2.amazonaws.com/bucket/key")
     b = mkreq("https://s3.us-west-2.amazonaws.com/bucket/key")
-    CloudBase.awssign!(a; credentials=creds, x_amz_date=dt)
-    CloudBase.awssign!(b; credentials=creds, x_amz_date=dt)
+    signreq!(a, "https://s3.us-west-2.amazonaws.com/bucket/key"; credentials=creds, x_amz_date=dt)
+    signreq!(b, "https://s3.us-west-2.amazonaws.com/bucket/key"; credentials=creds, x_amz_date=dt)
     @test HTTP.header(a, "Authorization") == HTTP.header(b, "Authorization")
 
     # a dotted bucket name signs against the s3 service rather than a bucket label
     d = mkreq("https://my.bucket.s3.us-west-2.amazonaws.com/key")
-    CloudBase.awssign!(d; credentials=creds, x_amz_date=dt)
+    signreq!(d, "https://my.bucket.s3.us-west-2.amazonaws.com/key"; credentials=creds, x_amz_date=dt)
     @test occursin("/us-west-2/s3/aws4_request", HTTP.header(d, "Authorization"))
 
     # S3 explicitly forbids path normalization because repeated slashes are part
     # of the object key.
     repeated = mkreq("https://s3.us-west-2.amazonaws.com/bucket/a//b")
     collapsed = mkreq("https://s3.us-west-2.amazonaws.com/bucket/a/b")
-    CloudBase.awssign!(repeated; credentials=creds, x_amz_date=dt)
-    CloudBase.awssign!(collapsed; credentials=creds, x_amz_date=dt)
+    signreq!(repeated, "https://s3.us-west-2.amazonaws.com/bucket/a//b"; credentials=creds, x_amz_date=dt)
+    signreq!(collapsed, "https://s3.us-west-2.amazonaws.com/bucket/a/b"; credentials=creds, x_amz_date=dt)
     @test HTTP.header(repeated, "Authorization") != HTTP.header(collapsed, "Authorization")
 
     # header deduplication tolerates an empty header set
