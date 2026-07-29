@@ -186,10 +186,16 @@ function Figgy.load(x::EC2CredentialsSource)
 end
 reloadEC2Credentials!(ecsHost="169.254.169.254", port=80) = Figgy.load!(AWS_CONFIGS, EC2CredentialsSource(ecsHost, port))
 
+# STS request parameters are Any-valued: DurationSeconds is an Int and WebIdentityToken
+# is read from a file, neither of which fits a Dict{String,String}
+sts_params(roleArn) = Dict{String,Any}("RoleArn" => roleArn)
+
 function loadRoleArn(roleArn, credFile, configFile)
     # with role_arn, we're going to call STS for temporary creds
     # so we need to figure out where our source creds come from
-    params = Dict("RoleArn" => roleArn)
+    # Dict{String,Any}: STS parameters below include non-String values (DurationSeconds is
+    # an Int, WebIdentityToken is read from a file), which a Dict{String,String} cannot hold
+    params = sts_params(roleArn)
     if haskey(AWS_CONFIGS, "role_session_name")
         params["RoleSessionName"] = AWS_CONFIGS["role_session_name"]
     else
@@ -216,7 +222,8 @@ function loadRoleArn(roleArn, credFile, configFile)
         )
     elseif haskey(AWS_CONFIGS, "web_identity_token_file")
         # load the web identity token to be passed to STS
-        params["WebIdentityToken"] = read(AWS_CONFIGS["web_identity_token_file"])
+        # the token is sent as a request parameter, so it must be text, not raw bytes
+        params["WebIdentityToken"] = strip(read(AWS_CONFIGS["web_identity_token_file"], String))
         params["Action"] = "AssumeRoleWithWebIdentity"
         nothing
     end
@@ -244,32 +251,58 @@ const AWS_DEFAULT_REGION = "us-east-1"
 
 # try to get service/region from host directly (otherwise, require user to pass service)
 # or use env variables for region
-# "amazonaws.com"
-# "s3.amazonaws.com"
-# "s3.us-west-2.amazonaws.com"
-# "bucket.s3.us-west-2.amazonaws.com"
-# "bucket.vpce-1a2b3c4d-5e6f.s3.us-east-1.vpce.amazonaws.com"
+# "amazonaws.com"                                          -> (nothing, nothing)
+# "s3.amazonaws.com"                                       -> ("s3", nothing)
+# "s3.us-west-2.amazonaws.com"                             -> ("s3", "us-west-2")
+# "bucket.s3.us-west-2.amazonaws.com"                      -> ("s3", "us-west-2")
+# "bucket.s3.amazonaws.com"                                -> ("s3", nothing)
+# "my.dotted.bucket.s3.us-west-2.amazonaws.com"            -> ("s3", "us-west-2")
+# "bucket.vpce-1a2b3c4d-5e6f.s3.us-east-1.vpce.amazonaws.com" -> ("s3", "us-east-1")
+#
+# Matching is anchored at the *end* of the host rather than counting labels from the
+# front: a bucket name may itself contain dots, so a fixed label count mistakes part of
+# the bucket for the service (e.g. "my.bucket.s3.amazonaws.com" previously returned
+# service="bucket", region="s3", producing a signature for the wrong credential scope).
 function urlServiceRegion(host)
     spl = split(host, '.')
-    if length(spl) == 5 && !all(isdigit, spl[2]) && !all(isdigit, spl[3])
-        return (spl[2], spl[3])
-    elseif length(spl) == 4 && !all(isdigit, spl[1]) && !all(isdigit, spl[2])
-        # got service & region
-        return (spl[1], spl[2])
-    elseif length(spl) == 3 && !all(isdigit, spl[1])
-        # just got service
-        return (spl[1], nothing)
-    elseif length(spl) == 7 && spl[5] == "vpce" && spl[6] == "amazonaws" && spl[7] == "com"
-        # See virtual private cloud https://docs.aws.amazon.com/AmazonS3/latest/userguide/privatelink-interface-endpoints.html
-        # got service & region
-        return (spl[3], spl[4])
-    else
-        # no service, no region
-        return (nothing, nothing)
+    n = length(spl)
+    # every AWS endpoint we can infer from ends with amazonaws.com
+    (n >= 3 && spl[n - 1] == "amazonaws" && spl[n] == "com") || return (nothing, nothing)
+    if n >= 6 && spl[n - 2] == "vpce"
+        # bucket.vpce-<id>.<service>.<region>.vpce.amazonaws.com
+        return (spl[n - 4], spl[n - 3])
     end
+    # walk back over amazonaws.com; what remains is [<bucket labels>...] <service> [<region>]
+    rest = @view spl[1:(n - 2)]
+    isempty(rest) && return (nothing, nothing)
+    if length(rest) == 1
+        # <service>.amazonaws.com
+        return (rest[1], nothing)
+    end
+    last_label = rest[end]
+    prev_label = rest[end - 1]
+    # a region label looks like "us-west-2"/"eu-central-1"; a service label does not
+    if isregionlabel(last_label)
+        return (prev_label, last_label)
+    end
+    # no region present, so the final label is the service (anything before it is the bucket)
+    return (last_label, nothing)
 end
 
-bytes(x::String) = unsafe_wrap(Array, pointer(x), sizeof(x))
+# AWS region identifiers are <area>-<direction>-<number>, e.g. us-west-2, ap-southeast-1,
+# us-gov-east-1, cn-north-1. Service labels ("s3", "sts", "dynamodb") never match this.
+function isregionlabel(label)
+    parts = split(label, '-')
+    length(parts) >= 3 || return false
+    all(isdigit, parts[end]) || return false
+    return all(p -> !isempty(p) && all(c -> 'a' <= c <= 'z', p), @view parts[1:end-1])
+end
+
+# Previously `unsafe_wrap(Array, pointer(x), sizeof(x))`, which aliases the String's buffer
+# without keeping it alive: callers pass temporaries (e.g. bytes("AWS4$secret")) that the
+# collector is free to reclaim before the resulting array is consumed. Copy instead; signing
+# is not hot enough for the alias to be worth the hazard.
+bytes(x::String) = Vector{UInt8}(codeunits(x))
 trimall(x) = strip(replace(x, r"[ ]{2,}" => " "))
 canonicalHeader(x::HTTP.Header) = strip(lowercase(x.first)) => trimall(x.second)
 const ISO8601 = dateformat"yyyymmdd\THHMMSS\Z"
@@ -290,6 +323,7 @@ uriencode(c::Char) = join((string('%', uppercase(string(Int(b), base=16, pad=2))
 uriencode(x, path=false) = join((safe(c) || (path && c == '/')) ? c : uriencode(c) for c in x)
 
 function deduplicateHeaders!(headers)
+    isempty(headers) && return
     j = 1
     k, v = first(headers)
     for i = 2:length(headers)
@@ -310,13 +344,13 @@ end
 function awssign!(request::HTTP.Request; service=nothing, region=nothing, credentials::Union{Nothing, AWSCredentials}=nothing, x_amz_date=nothing, includeContentSha256=true, debug=false, kw...)
     if debug
         return LoggingExtras.withlevel(Logging.Debug; verbosity=1) do
-            awssign!(request; service, region, access_key_id, secret_access_key, session_token, x_amz_date, includeContentSha256, kw...)
+            awssign!(request; service, region, credentials, x_amz_date, includeContentSha256, kw...)
         end
     end
     # determine the service & region for the request (needed for signing)
     serv, reg = urlServiceRegion(request.url.host)
     service = _some(service, serv)
-    service === nothing && ArgumentError("unable to determine AWS service for request; pass `service=X`")
+    service === nothing && throw(ArgumentError("unable to determine AWS service for request from host `$(request.url.host)`; pass `service=X`"))
     region = something(reg, region, get(AWS_CONFIGS, "region", AWS_DEFAULT_REGION))
     @debugv 1 "computed service = `$service`, region = `$region` for aws request"
     # if the credentials is empty, let's assume this is for a public request, so no signing required
@@ -337,7 +371,9 @@ function awssign!(request::HTTP.Request; service=nothing, region=nothing, creden
     service = lowercase(service)
     canonicalURI = URIs.normpath((service == "s3" || service == "service") ? uriencode(request.url.path, true) : escapepath(request.url.path))
     # @show canonicalURI
-    canonicalQueryString = join((string(uriencode(k), "=", uriencode(v)) for (k, v) in sort!(queryparampairs(request.url); by=x->"$(x[1])$(x[2])")), "&")
+    # SigV4 sorts by parameter name, then by value. Sorting on the *concatenation* of the
+    # two conflates them ("ab"*"c" == "a"*"bc"), so sort on the pair itself.
+    canonicalQueryString = join((string(uriencode(k), "=", uriencode(v)) for (k, v) in sort!(queryparampairs(request.url); by=x->(x[1], x[2]))), "&")
     # @show request.url, queryparampairs(request.url), canonicalQueryString
     headers = sort!(map(canonicalHeader, request.headers); by=x->x.first)
     deduplicateHeaders!(headers)

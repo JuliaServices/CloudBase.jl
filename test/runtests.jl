@@ -1,6 +1,6 @@
 using CloudBase, Test, CloudBase.CloudTest, JSON3, JSON, Dates, HTTP, OpenSSL
 using CloudBase: AWS, Azure, GCP
-using Sockets, Random
+using Sockets, Random, URIs
 
 const x32bit = Sys.WORD_SIZE == 32
 
@@ -618,4 +618,143 @@ end
     # Unreachable network
     _, duration = @timed @test_throws Base.IOError CloudTest._connect_with_timeout("224.0.0.1", refused_port, 1)
     @test duration < 2
+end
+
+@testset "urlServiceRegion" begin
+    usr = CloudBase.urlServiceRegion
+    # documented endpoint shapes
+    @test usr("s3.amazonaws.com") == ("s3", nothing)
+    @test usr("s3.us-west-2.amazonaws.com") == ("s3", "us-west-2")
+    @test usr("bucket.s3.us-west-2.amazonaws.com") == ("s3", "us-west-2")
+    @test usr("bucket.vpce-1a2b3c4d-5e6f.s3.us-east-1.vpce.amazonaws.com") == ("s3", "us-east-1")
+    @test usr("sts.amazonaws.com") == ("sts", nothing)
+    @test usr("dynamodb.eu-central-1.amazonaws.com") == ("dynamodb", "eu-central-1")
+
+    # a bucket without a region label in the host
+    @test usr("bucket.s3.amazonaws.com") == ("s3", nothing)
+
+    # bucket names may contain dots; matching must be anchored at the end of the host
+    # so that a bucket label is never mistaken for the service or region
+    @test usr("my.bucket.s3.amazonaws.com") == ("s3", nothing)
+    @test usr("my.bucket.s3.us-west-2.amazonaws.com") == ("s3", "us-west-2")
+    @test usr("a.b.c.d.s3.ap-southeast-1.amazonaws.com") == ("s3", "ap-southeast-1")
+
+    # other partitions still parse
+    @test usr("s3.us-gov-east-1.amazonaws.com") == ("s3", "us-gov-east-1")
+    @test usr("s3.cn-north-1.amazonaws.com") == ("s3", "cn-north-1")
+
+    # hosts we cannot infer anything from
+    @test usr("amazonaws.com") == (nothing, nothing)
+    @test usr("example.com") == (nothing, nothing)
+    @test usr("127.0.0.1") == (nothing, nothing)
+    @test usr("localhost") == (nothing, nothing)
+
+    @test CloudBase.isregionlabel("us-west-2")
+    @test CloudBase.isregionlabel("ap-southeast-1")
+    @test !CloudBase.isregionlabel("s3")
+    @test !CloudBase.isregionlabel("amazonaws")
+    @test !CloudBase.isregionlabel("my-bucket-name")
+end
+
+@testset "AWSSigV4 signing edge cases" begin
+    creds = CloudBase.AWSCredentials("AKIAIOSFODNN7EXAMPLE", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY")
+    mkreq(url; method="GET") = begin
+        r = HTTP.Request(method, url, HTTP.Header[], UInt8[])
+        r.url = HTTP.URI(url)
+        r
+    end
+
+    # a host we cannot derive a service from must say so, not fail later inside signing
+    err = try
+        CloudBase.awssign!(mkreq("https://example.com/path"); credentials=creds)
+    catch e
+        e
+    end
+    @test err isa ArgumentError
+    @test occursin("unable to determine AWS service", err.msg)
+    # ...and passing service explicitly works
+    r = mkreq("https://example.com/path")
+    CloudBase.awssign!(r; credentials=creds, service="s3", region="us-east-1")
+    @test occursin("AWS4-HMAC-SHA256", HTTP.header(r, "Authorization"))
+
+    # debug=true previously referenced undefined variables
+    r = mkreq("https://s3.us-west-2.amazonaws.com/b/k")
+    CloudBase.awssign!(r; credentials=creds, debug=true)
+    @test occursin("Credential=AKIAIOSFODNN7EXAMPLE/", HTTP.header(r, "Authorization"))
+
+    # canonical query params sort by (name, value), not by their concatenation:
+    # "ab"*"c" == "a"*"bc" would otherwise make the ordering ambiguous
+    r1 = mkreq("https://s3.us-west-2.amazonaws.com/b/k?ab=c&a=bc")
+    r2 = mkreq("https://s3.us-west-2.amazonaws.com/b/k?a=bc&ab=c")
+    dt = DateTime(2024, 1, 1)
+    CloudBase.awssign!(r1; credentials=creds, x_amz_date=dt)
+    CloudBase.awssign!(r2; credentials=creds, x_amz_date=dt)
+    # the same query set in either order must produce the same signature
+    @test HTTP.header(r1, "Authorization") == HTTP.header(r2, "Authorization")
+
+    # signing is deterministic for a fixed timestamp
+    a = mkreq("https://s3.us-west-2.amazonaws.com/bucket/key")
+    b = mkreq("https://s3.us-west-2.amazonaws.com/bucket/key")
+    CloudBase.awssign!(a; credentials=creds, x_amz_date=dt)
+    CloudBase.awssign!(b; credentials=creds, x_amz_date=dt)
+    @test HTTP.header(a, "Authorization") == HTTP.header(b, "Authorization")
+
+    # a dotted bucket name signs against the s3 service rather than a bucket label
+    d = mkreq("https://my.bucket.s3.us-west-2.amazonaws.com/key")
+    CloudBase.awssign!(d; credentials=creds, x_amz_date=dt)
+    @test occursin("/us-west-2/s3/aws4_request", HTTP.header(d, "Authorization"))
+
+    # header deduplication tolerates an empty header set
+    empty_headers = Pair{String,String}[]
+    @test CloudBase.deduplicateHeaders!(empty_headers) === nothing
+    @test isempty(empty_headers)
+
+    # STS parameters accept the non-String values the AssumeRole paths supply
+    params = CloudBase.sts_params("arn:aws:iam::123456789012:role/demo")
+    params["DurationSeconds"] = 900
+    params["WebIdentityToken"] = "token-text"
+    @test params["DurationSeconds"] == 900
+    @test params["WebIdentityToken"] == "token-text"
+end
+
+@testset "Azure credential + SAS correctness" begin
+    # IMDS reports expires_on as a JSON string; Figgy parses JSON scalars as Strings,
+    # so the raw value must not reach unix2datetime directly
+    @test CloudBase.azureExpiration("1506484173") == Dates.unix2datetime(1506484173)
+    @test CloudBase.azureExpiration("") === nothing
+    @test CloudBase.azureExpiration(nothing) === nothing
+    @test CloudBase.azureExpiration(1506484173) == Dates.unix2datetime(1506484173)
+    @test CloudBase.azureExpiration(DateTime(2024, 1, 1)) == DateTime(2024, 1, 1)
+
+    # ContentType maps to the rsct query parameter; it previously reused
+    # ContentLanguage's rscl field name, so the emitted query and the signed
+    # string-to-sign disagreed and Azure rejected the signature
+    @test fieldname(CloudBase.ContentType, 1) === :rsct
+    @test fieldname(CloudBase.ContentLanguage, 1) === :rscl
+
+    # `service` sits in an optional regex group and may not participate
+    ok, service, host, account, container, blob = CloudBase.parseAzureAccountContainerBlob("azure://myaccount/mycontainer")
+    @test ok
+    @test account == "myaccount"
+    @test container == "mycontainer"
+    @test service == "blob"
+    ok2, service2, _, account2, container2, blob2 = CloudBase.parseAzureAccountContainerBlob("https://myaccount.blob.core.windows.net/cont/myblob")
+    @test ok2 && service2 == "blob" && account2 == "myaccount" && container2 == "cont" && blob2 == "myblob"
+
+    # getCanonicalizedResource returns (resource, service); callers must destructure it
+    # rather than interpolate the tuple into a string-to-sign
+    res = CloudBase.getCanonicalizedResource(URIs.URI("https://acct.blob.core.windows.net/cont/blob"))
+    @test res isa Tuple
+    @test res[1] == "/blob/acct/cont/blob"
+    @test res[2] == "blob"
+
+    # the user-delegation SAS entry points must resolve to real methods
+    @test hasmethod(CloudBase.generateUserDelegationSASToken, Tuple{String})
+    @test hasmethod(CloudBase.generateUserDelegationSASToken, Tuple{URIs.URI})
+    @test hasmethod(CloudBase.generateUserDelegationSASURI, Tuple{String})
+    @test hasmethod(CloudBase.generateUserDelegationSASURI, Tuple{URIs.URI})
+
+    # reloadAzureVMCredentials! is callable with no arguments
+    @test hasmethod(CloudBase.reloadAzureVMCredentials!, Tuple{})
+    @test hasmethod(CloudBase.reloadAzureVMCredentials!, Tuple{String})
 end

@@ -73,6 +73,19 @@ azureVMConfig() = Figgy.kmap(Figgy.EnvironmentVariables(),
     "AZURE_TOKEN_MI_RES_ID" => "mi_res_id",; select=true
 )
 
+# Azure IMDS reports `expires_on` as seconds-since-epoch, but as a JSON string; other
+# sources may supply a DateTime or nothing. Normalise all of them to Union{Nothing,DateTime}.
+azureExpiration(::Nothing) = nothing
+azureExpiration(x::DateTime) = x
+azureExpiration(x::Real) = Dates.unix2datetime(x)
+function azureExpiration(x::AbstractString)
+    isempty(x) && return nothing
+    secs = tryparse(Float64, x)
+    secs !== nothing && return Dates.unix2datetime(secs)
+    dt = tryparse(DateTime, rstrip(String(x), 'Z'))
+    return dt
+end
+
 function azureLoadConfig!(expireThreshold=Dates.Minute(5))
     # on each fresh load, we want to clear out potentially stale credential fields
     # note that each load, we *will* replace AZURE_CONFIGS["credentials"]
@@ -94,8 +107,10 @@ function azureLoadConfig!(expireThreshold=Dates.Minute(5))
     )
     # after doing a single config "load", we want to bundle the credentials
     # together as one object in AZURE_CONFIGS, so we know they all came "together"
+    # IMDS returns expires_on as a JSON string, and Figgy parses JSON scalars as
+    # Strings, so unix2datetime must not be handed the raw value
     exp = get(AZURE_CONFIGS, "expiration", "")
-    expiration = exp === nothing ? exp : Dates.unix2datetime(exp)
+    expiration = azureExpiration(exp)
     if haskey(AZURE_CONFIGS, "sas_token")
         auth = SASToken(AZURE_CONFIGS["sas_token"])
     elseif haskey(AZURE_CONFIGS, "access_token")
@@ -130,7 +145,8 @@ function Figgy.load(x::AzureVMCredentialsSource)
         "expires_on" => "expiration",
     )
 end
-reloadAzureVMCredentials!(vmHost=nothing) = Figgy.load!(AZURE_CONFIGS, AzureVMCredentialsSource(vmHost))
+reloadAzureVMCredentials!(vmHost::String) = Figgy.load!(AZURE_CONFIGS, AzureVMCredentialsSource(vmHost))
+reloadAzureVMCredentials!() = Figgy.load!(AZURE_CONFIGS, AzureVMCredentialsSource())
 
 const AZURE_API_VERSION = "2021-04-10"
 const RFC1123Format = dateformat"e, dd u yyyy HH:MM:SS \G\M\T"
