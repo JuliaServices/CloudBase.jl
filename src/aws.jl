@@ -264,30 +264,38 @@ const AWS_DEFAULT_REGION = "us-east-1"
 # the bucket for the service (e.g. "my.bucket.s3.amazonaws.com" previously returned
 # service="bucket", region="s3", producing a signature for the wrong credential scope).
 function urlServiceRegion(host)
-    spl = split(host, '.')
-    n = length(spl)
-    # every AWS endpoint we can infer from ends with amazonaws.com
-    (n >= 3 && spl[n - 1] == "amazonaws" && spl[n] == "com") || return (nothing, nothing)
-    if n >= 6 && spl[n - 2] == "vpce"
-        # bucket.vpce-<id>.<service>.<region>.vpce.amazonaws.com
-        return (spl[n - 4], spl[n - 3])
+    spl = split(lowercase(String(host)), '.')
+    suffix_length = if length(spl) >= 3 && spl[end - 1:end] == ["amazonaws", "com"]
+        2
+    elseif length(spl) >= 4 && spl[end - 2:end] == ["amazonaws", "com", "cn"]
+        3
+    else
+        return (nothing, nothing)
     end
-    # walk back over amazonaws.com; what remains is [<bucket labels>...] <service> [<region>]
-    rest = @view spl[1:(n - 2)]
+    rest = @view spl[1:(end - suffix_length)]
     isempty(rest) && return (nothing, nothing)
+    if length(rest) >= 4 && rest[end] == "vpce"
+        # bucket.vpce-<id>.<service>.<region>.vpce.amazonaws.com
+        return (endpointSigningService(rest[end - 2]), rest[end - 1])
+    end
     if length(rest) == 1
         # <service>.amazonaws.com
-        return (rest[1], nothing)
+        return (endpointSigningService(rest[1]), nothing)
     end
     last_label = rest[end]
-    prev_label = rest[end - 1]
     # a region label looks like "us-west-2"/"eu-central-1"; a service label does not
     if isregionlabel(last_label)
-        return (prev_label, last_label)
+        service_index = lastindex(rest) - 1
+        while service_index > 1 && rest[service_index] in ("dualstack", "fips")
+            service_index -= 1
+        end
+        return (endpointSigningService(rest[service_index]), last_label)
     end
     # no region present, so the final label is the service (anything before it is the bucket)
-    return (last_label, nothing)
+    return (endpointSigningService(last_label), nothing)
 end
+
+endpointSigningService(service) = replace(String(service), r"-fips$" => "")
 
 # AWS region identifiers are <area>-<direction>-<number>, e.g. us-west-2, ap-southeast-1,
 # us-gov-east-1, cn-north-1. Service labels ("s3", "sts", "dynamodb") never match this.
@@ -322,6 +330,12 @@ safe(c::Char) = c == '-' || c == '_' || c == '.' || c == '~' || ('A' <= c <= 'Z'
 uriencode(c::Char) = join((string('%', uppercase(string(Int(b), base=16, pad=2))) for b in CodeUnits(c)))
 uriencode(x, path=false) = join((safe(c) || (path && c == '/')) ? c : uriencode(c) for c in x)
 
+function canonicalQuery(url)
+    encoded = [(uriencode(k), uriencode(v)) for (k, v) in queryparampairs(url)]
+    sort!(encoded; by=identity)
+    return join((string(k, "=", v) for (k, v) in encoded), "&")
+end
+
 function deduplicateHeaders!(headers)
     isempty(headers) && return
     j = 1
@@ -347,14 +361,14 @@ function awssign!(request::HTTP.Request; service=nothing, region=nothing, creden
             awssign!(request; service, region, credentials, x_amz_date, includeContentSha256, kw...)
         end
     end
+    # An absent credential object denotes an intentionally public request.
+    credentials === nothing && return
     # determine the service & region for the request (needed for signing)
     serv, reg = urlServiceRegion(request.url.host)
     service = _some(service, serv)
     service === nothing && throw(ArgumentError("unable to determine AWS service for request from host `$(request.url.host)`; pass `service=X`"))
     region = something(reg, region, get(AWS_CONFIGS, "region", AWS_DEFAULT_REGION))
     @debugv 1 "computed service = `$service`, region = `$region` for aws request"
-    # if the credentials is empty, let's assume this is for a public request, so no signing required
-    credentials === nothing && return
     # determine credentials
     creds = getCredentials(credentials)
     # we're going to set Authorization header, so delete it if present
@@ -369,11 +383,17 @@ function awssign!(request::HTTP.Request; service=nothing, region=nothing, creden
     # https://docs.aws.amazon.com/general/latest/gr/sigv4_signing.html
     # Task 1: Create a canonical request for Signature Version 4
     service = lowercase(service)
-    canonicalURI = URIs.normpath((service == "s3" || service == "service") ? uriencode(request.url.path, true) : escapepath(request.url.path))
+    request_path = isempty(request.url.path) ? "/" : request.url.path
+    canonicalURI = if service == "s3"
+        # S3 object keys may contain repeated slashes and dot segments; normalizing
+        # them signs a different object than the one the caller requested.
+        uriencode(request_path, true)
+    else
+        URIs.normpath(service == "service" ? uriencode(request_path, true) : escapepath(request_path))
+    end
     # @show canonicalURI
-    # SigV4 sorts by parameter name, then by value. Sorting on the *concatenation* of the
-    # two conflates them ("ab"*"c" == "a"*"bc"), so sort on the pair itself.
-    canonicalQueryString = join((string(uriencode(k), "=", uriencode(v)) for (k, v) in sort!(queryparampairs(request.url); by=x->(x[1], x[2]))), "&")
+    # SigV4 sorts the encoded parameter names and values, not their raw forms.
+    canonicalQueryString = canonicalQuery(request.url)
     # @show request.url, queryparampairs(request.url), canonicalQueryString
     headers = sort!(map(canonicalHeader, request.headers); by=x->x.first)
     deduplicateHeaders!(headers)

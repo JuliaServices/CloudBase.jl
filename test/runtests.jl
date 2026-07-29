@@ -1,6 +1,6 @@
 using CloudBase, Test, CloudBase.CloudTest, JSON3, JSON, Dates, HTTP, OpenSSL
 using CloudBase: AWS, Azure, GCP
-using Sockets, Random, URIs
+using Sockets, Random, URIs, Base64
 
 const x32bit = Sys.WORD_SIZE == 32
 
@@ -61,7 +61,7 @@ end
     delete!(configs, :accessKeyId)
     delete!(configs, :secretAccessKey)
     debug = false
-    knownFailures = (19, 20, 23, 26)
+    knownFailures = (19, 20, 26)
     for (i, case) in enumerate(cases.tests.all)
         println("testing AWSSig4 case = $(case.name), i = $i")
         req = HTTP.Request(case.request.method, case.request.path, case.request.headers, case.request.body; url=HTTP.URI(case.request.uri))
@@ -641,7 +641,13 @@ end
 
     # other partitions still parse
     @test usr("s3.us-gov-east-1.amazonaws.com") == ("s3", "us-gov-east-1")
-    @test usr("s3.cn-north-1.amazonaws.com") == ("s3", "cn-north-1")
+    @test usr("s3.cn-north-1.amazonaws.com.cn") == ("s3", "cn-north-1")
+    @test usr("bucket.s3.cn-northwest-1.amazonaws.com.cn") == ("s3", "cn-northwest-1")
+
+    # endpoint modifiers do not change the SigV4 service name
+    @test usr("s3.dualstack.us-west-2.amazonaws.com") == ("s3", "us-west-2")
+    @test usr("bucket.s3.dualstack.us-west-2.amazonaws.com") == ("s3", "us-west-2")
+    @test usr("s3-fips.dualstack.us-west-2.amazonaws.com") == ("s3", "us-west-2")
 
     # hosts we cannot infer anything from
     @test usr("amazonaws.com") == (nothing, nothing)
@@ -672,6 +678,10 @@ end
     end
     @test err isa ArgumentError
     @test occursin("unable to determine AWS service", err.msg)
+    # public requests do not require endpoint inference because they are not signed
+    public_request = mkreq("https://example.com/path")
+    @test CloudBase.awssign!(public_request) === nothing
+    @test isempty(HTTP.header(public_request, "Authorization"))
     # ...and passing service explicitly works
     r = mkreq("https://example.com/path")
     CloudBase.awssign!(r; credentials=creds, service="s3", region="us-east-1")
@@ -692,6 +702,11 @@ end
     # the same query set in either order must produce the same signature
     @test HTTP.header(r1, "Authorization") == HTTP.header(r2, "Authorization")
 
+    # Sorting happens after URI encoding: `%5B` sorts before `A`, even though the
+    # raw `[` character sorts after it.
+    encoded_order = HTTP.URI("https://s3.us-west-2.amazonaws.com/b/k?A=right&%5B=left")
+    @test CloudBase.canonicalQuery(encoded_order) == "%5B=left&A=right"
+
     # signing is deterministic for a fixed timestamp
     a = mkreq("https://s3.us-west-2.amazonaws.com/bucket/key")
     b = mkreq("https://s3.us-west-2.amazonaws.com/bucket/key")
@@ -703,6 +718,14 @@ end
     d = mkreq("https://my.bucket.s3.us-west-2.amazonaws.com/key")
     CloudBase.awssign!(d; credentials=creds, x_amz_date=dt)
     @test occursin("/us-west-2/s3/aws4_request", HTTP.header(d, "Authorization"))
+
+    # S3 explicitly forbids path normalization because repeated slashes are part
+    # of the object key.
+    repeated = mkreq("https://s3.us-west-2.amazonaws.com/bucket/a//b")
+    collapsed = mkreq("https://s3.us-west-2.amazonaws.com/bucket/a/b")
+    CloudBase.awssign!(repeated; credentials=creds, x_amz_date=dt)
+    CloudBase.awssign!(collapsed; credentials=creds, x_amz_date=dt)
+    @test HTTP.header(repeated, "Authorization") != HTTP.header(collapsed, "Authorization")
 
     # header deduplication tolerates an empty header set
     empty_headers = Pair{String,String}[]
@@ -725,12 +748,29 @@ end
     @test CloudBase.azureExpiration(nothing) === nothing
     @test CloudBase.azureExpiration(1506484173) == Dates.unix2datetime(1506484173)
     @test CloudBase.azureExpiration(DateTime(2024, 1, 1)) == DateTime(2024, 1, 1)
+    @test_throws ArgumentError CloudBase.azureExpiration("not-a-date")
 
     # ContentType maps to the rsct query parameter; it previously reused
     # ContentLanguage's rscl field name, so the emitted query and the signed
     # string-to-sign disagreed and Azure rejected the signature
     @test fieldname(CloudBase.ContentType, 1) === :rsct
     @test fieldname(CloudBase.ContentLanguage, 1) === :rscl
+
+    directory_url = URIs.URI("https://acct.blob.core.windows.net/cont/directory")
+    directory_resource = CloudBase.SignedResource(blob=false, directory=true)
+    @test_throws ArgumentError CloudBase.generateServiceSASToken(
+        directory_url,
+        Base64.base64encode("test-key");
+        signedResource=directory_resource,
+    )
+    directory_sas = CloudBase.generateServiceSASToken(
+        directory_url,
+        Base64.base64encode("test-key");
+        signedResource=directory_resource,
+        signedDirectoryDepth=CloudBase.SignedDirectoryDepth(2),
+    )
+    @test Dict(URIs.queryparampairs(URIs.URI("?$directory_sas")))["sdd"] == "2"
+    @test_throws ArgumentError CloudBase.SignedDirectoryDepth(-1)
 
     # `service` sits in an optional regex group and may not participate
     ok, service, host, account, container, blob = CloudBase.parseAzureAccountContainerBlob("azure://myaccount/mycontainer")

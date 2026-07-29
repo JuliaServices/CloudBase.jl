@@ -83,6 +83,7 @@ function azureExpiration(x::AbstractString)
     secs = tryparse(Float64, x)
     secs !== nothing && return Dates.unix2datetime(secs)
     dt = tryparse(DateTime, rstrip(String(x), 'Z'))
+    dt === nothing && throw(ArgumentError("invalid Azure credential expiration: $(repr(x))"))
     return dt
 end
 

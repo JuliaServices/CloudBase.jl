@@ -202,6 +202,10 @@ SignedResource(; container::Bool=false, blob::Bool=true, blobVersion::Bool=false
 
 struct SignedDirectoryDepth
     sdd::Int
+    function SignedDirectoryDepth(sdd::Integer)
+        sdd >= 0 || throw(ArgumentError("signed directory depth must be non-negative"))
+        return new(Int(sdd))
+    end
 end
 
 struct CacheControl
@@ -291,6 +295,8 @@ function generateServiceSASToken(url::URI, key::String;
     signedSnapshotTime=nothing)
 
     canonicalizedResource, service = getCanonicalizedResource(url)
+    str(signedResource) == "d" && signedDirectoryDepth === nothing &&
+        throw(ArgumentError("signedDirectoryDepth is required for a directory SAS"))
     if service == "queue"
         stringToSign = """$(str(signedPermission))
         $(str(signedStart))
@@ -335,9 +341,9 @@ function generateServiceSASToken(url::URI, key::String;
     # println(stringToSign)
     # @show sig
     query = URIs.queryparams(url)
-    for x in (signedVersion, signedPermission, signedStart, signedExpiry, signedIP, signedProtocol, signedEncryptionScope, signedResource, signedSnapshotTime, cacheControl, contentDisposition, contentEncoding, contentLanguage, contentType, tableName, startPk, startRk, endPk, endRk, signedIdentifier)
+    for x in (signedVersion, signedPermission, signedStart, signedExpiry, signedIP, signedProtocol, signedEncryptionScope, signedResource, signedDirectoryDepth, signedSnapshotTime, cacheControl, contentDisposition, contentEncoding, contentLanguage, contentType, tableName, startPk, startRk, endPk, endRk, signedIdentifier)
         if !isnothing(x)
-            query[String(fieldname(typeof(x), 1))] = getfield(x, 1)
+            query[String(fieldname(typeof(x), 1))] = string(getfield(x, 1))
         end
     end
     query["sig"] = sig
@@ -448,6 +454,8 @@ function generateUserDelegationSASToken(url::URI;
     signedSnapshotTime=nothing, kw...)
 
     canonicalizedResource, _service = getCanonicalizedResource(url)
+    str(signedResource) == "d" && signedDirectoryDepth === nothing &&
+        throw(ArgumentError("signedDirectoryDepth is required for a directory SAS"))
     signedKeyObjectId,
         signedKeyTenantId,
         signedKeyStartTime,
@@ -483,9 +491,9 @@ function generateUserDelegationSASToken(url::URI;
     # println(stringToSign)
     # @show sig
     query = URIs.queryparams(url)
-    for x in (signedPermission, signedStart, signedExpiry, signedIP, signedProtocol, signedVersion, signedResource, signedSnapshotTime, signedEncryptionScope, cacheControl, contentDisposition, contentEncoding, contentLanguage, contentType, signedKeyObjectId, signedKeyTenantId, signedKeyStartTime, signedKeyExpiryTime, signedKeyService, signedKeyVersion, signedAuthorizedObjectId, signedUnauthorizedObjectId, signedCorrelationId)
+    for x in (signedPermission, signedStart, signedExpiry, signedIP, signedProtocol, signedVersion, signedResource, signedDirectoryDepth, signedSnapshotTime, signedEncryptionScope, cacheControl, contentDisposition, contentEncoding, contentLanguage, contentType, signedKeyObjectId, signedKeyTenantId, signedKeyStartTime, signedKeyExpiryTime, signedKeyService, signedKeyVersion, signedAuthorizedObjectId, signedUnauthorizedObjectId, signedCorrelationId)
         if !isnothing(x)
-            query[String(fieldname(typeof(x), 1))] = getfield(x, 1)
+            query[String(fieldname(typeof(x), 1))] = string(getfield(x, 1))
         end
     end
     query["sig"] = sig
