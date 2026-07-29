@@ -64,8 +64,9 @@ end
     knownFailures = (19, 20, 23, 26)
     for (i, case) in enumerate(cases.tests.all)
         println("testing AWSSig4 case = $(case.name), i = $i")
-        req = HTTP.Request(case.request.method, case.request.path, case.request.headers, case.request.body; url=HTTP.URI(case.request.uri))
-        CloudBase.awssign!(req; x_amz_date=DateTime(2015, 8, 30, 12, 36), includeContentSha256=false, debug=debug, configs...)
+        hdrs = Pair{String,String}[String(h[1]) => String(h[2]) for h in case.request.headers]
+        req = HTTP.Request(case.request.method, case.request.path, hdrs, case.request.body)
+        CloudBase.awssign!(req, HTTP.URI(case.request.uri); x_amz_date=DateTime(2015, 8, 30, 12, 36), includeContentSha256=false, debug=debug, configs...)
         if i in knownFailures
             @test_broken HTTP.header(req, "Authorization") == case.authz
         else
@@ -75,14 +76,15 @@ end
 end
 
 @testset "AWSSigV2" begin
-    req = HTTP.Request("GET", "/?Action=DescribeJobFlows"; url=HTTP.URI("https://elasticmapreduce.amazonaws.com?Action=DescribeJobFlows"))
+    req = HTTP.Request("GET", "/?Action=DescribeJobFlows")
     credentials = CloudBase.AWSCredentials("AKIAIOSFODNN7EXAMPLE", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY")
-    CloudBase.awssignv2!(req; credentials, timestamp=DateTime(2011, 10, 3, 15, 19, 30), version="2009-03-31")
+    CloudBase.awssignv2!(req, HTTP.URI("https://elasticmapreduce.amazonaws.com?Action=DescribeJobFlows"); credentials, timestamp=DateTime(2011, 10, 3, 15, 19, 30), version="2009-03-31")
     @test req.target ==
         "?AWSAccessKeyId=AKIAIOSFODNN7EXAMPLE&Action=DescribeJobFlows&SignatureMethod=HmacSHA256&SignatureVersion=2&Timestamp=2011-10-03T15%3A19%3A30&Version=2009-03-31&Signature=i91nKc4PWAt0JJIdXwz9HxZCJDdiy6cf%2FMj6vPxyYIs%3D"
-    req = HTTP.Request("POST", "/", [], Dict("Action" => "DescribeJobFlows"); url=HTTP.URI("https://elasticmapreduce.amazonaws.com"))
-    CloudBase.awssignv2!(req; credentials, timestamp=DateTime(2011, 10, 3, 15, 19, 30), version="2009-03-31")
-    @test req.body["Signature"] == "wseguMzBRgA/4/fan8ZwEa0PIF+ws4WFbTJcG1ts5RY="
+    req = HTTP.Request("POST", "/", Pair{String,String}[], HTTP.escapeuri(Dict("Action" => "DescribeJobFlows")))
+    CloudBase.awssignv2!(req, HTTP.URI("https://elasticmapreduce.amazonaws.com"); credentials, timestamp=DateTime(2011, 10, 3, 15, 19, 30), version="2009-03-31")
+    signed = HTTP.URIs.queryparams(HTTP.URI("?" * String(copy(CloudBase.requestbodybytes(req)))))
+    @test signed["Signature"] == "wseguMzBRgA/4/fan8ZwEa0PIF+ws4WFbTJcG1ts5RY="
 end
 
 @time @testset "AWS" begin
@@ -219,8 +221,8 @@ end
 
 @testset "GCP Access Token" begin
     creds = GCP.Credentials("TEST_TOKEN")
-    req = HTTP.Request("GET", "/test"; url=HTTP.URI("https://storage.googleapis.com/test-bucket/test"))
-    CloudBase.gcpsign!(req; credentials=creds)
+    req = HTTP.Request("GET", "/test")
+    CloudBase.gcpsign!(req, HTTP.URI("https://storage.googleapis.com/test-bucket/test"); credentials=creds)
     @test HTTP.header(req, "Authorization") == "Bearer TEST_TOKEN"
 
     port, socket = Sockets.listenany(IPv4(0), rand(RandomDevice(), 10000:50000))
@@ -331,8 +333,8 @@ end
             @test params["client_secret"] == "authorized-client-secret"
             @test params["refresh_token"] == "authorized-refresh-token"
 
-            req = HTTP.Request("GET", "/test"; url=HTTP.URI("https://storage.googleapis.com/test-bucket/test"))
-            CloudBase.gcpsign!(req; credentials=creds)
+            req = HTTP.Request("GET", "/test")
+            CloudBase.gcpsign!(req, HTTP.URI("https://storage.googleapis.com/test-bucket/test"); credentials=creds)
             @test HTTP.header(req, "Authorization") == "Bearer GCP_AUTHORIZED_USER_TOKEN"
             @test HTTP.header(req, "x-goog-user-project") == "billing-project"
         finally
@@ -387,8 +389,8 @@ end
                 @test impersonation_payload["scope"] == CloudBase.GCP_DEFAULT_SCOPES
                 @test impersonation_payload["lifetime"] == "1800s"
 
-                req = HTTP.Request("GET", "/test"; url=HTTP.URI("https://storage.googleapis.com/test-bucket/test"))
-                CloudBase.gcpsign!(req; credentials=creds)
+                req = HTTP.Request("GET", "/test")
+                CloudBase.gcpsign!(req, HTTP.URI("https://storage.googleapis.com/test-bucket/test"); credentials=creds)
                 @test HTTP.header(req, "x-goog-user-project") == "external-billing-project"
             end
         end
@@ -445,14 +447,12 @@ end
 
     creds = GCP.Credentials("HMAC_ACCESS_ID", "HMAC_SECRET"; quota_project_id="test-project")
     request_time = DateTime(2026, 1, 2, 3, 4, 5)
-    req = HTTP.Request("PUT", "/test-bucket/test-object", ["Content-Type" => "text/plain"], "hello";
-        url=HTTP.URI("https://storage.googleapis.com/test-bucket/test-object"))
-    expected = HTTP.Request("PUT", "/test-bucket/test-object", ["Content-Type" => "text/plain"], "hello";
-        url=HTTP.URI("https://storage.googleapis.com/test-bucket/test-object"))
+    req = HTTP.Request("PUT", "/test-bucket/test-object", ["Content-Type" => "text/plain"], "hello")
+    expected = HTTP.Request("PUT", "/test-bucket/test-object", ["Content-Type" => "text/plain"], "hello")
 
-    CloudBase.gcpsign!(req; credentials=creds, x_amz_date=request_time)
+    CloudBase.gcpsign!(req, HTTP.URI("https://storage.googleapis.com/test-bucket/test-object"); credentials=creds, x_amz_date=request_time)
     HTTP.setheader(expected, "x-amz-project-id" => "test-project")
-    CloudBase.awssign!(expected; service="s3", region="us-east-1", credentials=CloudBase.AWSCredentials("HMAC_ACCESS_ID", "HMAC_SECRET"), x_amz_date=request_time)
+    CloudBase.awssign!(expected, HTTP.URI("https://storage.googleapis.com/test-bucket/test-object"); service="s3", region="us-east-1", credentials=CloudBase.AWSCredentials("HMAC_ACCESS_ID", "HMAC_SECRET"), x_amz_date=request_time)
 
     @test HTTP.header(req, "Authorization") == HTTP.header(expected, "Authorization")
     @test HTTP.header(req, "x-amz-date") == HTTP.header(expected, "x-amz-date")

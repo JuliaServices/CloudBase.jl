@@ -4,7 +4,6 @@ export CloudTest
 
 using Dates, Base64, Random, Sockets
 using HTTP, URIs, SHA, MD5, LoggingExtras, Figgy, JSON, OpenSSL
-import FunctionWrappers: FunctionWrapper
 
 """
     CloudCredentials
@@ -46,65 +45,106 @@ end
 # expiration check for credential types that support refreshing
 expired(x) = x.expiration !== nothing && Dates.now(Dates.UTC) > (x.expiration - x.expireThreshold)
 
+
+# HTTP 2 request bodies are typed objects rather than raw bytes, and `HTTP.isbytes`
+# no longer exists. Signing needs the payload bytes for its SHA-256/HMAC.
+requestbodybytes(request::HTTP.Request) = bodybytes(request.body)
+bodybytes(body::HTTP.BytesBody) = body.data
+bodybytes(::HTTP.EmptyBody) = UInt8[]
+bodybytes(body::AbstractVector{UInt8}) = body
+bodybytes(body::AbstractString) = Vector{UInt8}(codeunits(String(body)))
+bodybytes(body) = Vector{UInt8}(codeunits(HTTP.escapeuri(body)))
+
 include("aws.jl")
 include("azure.jl")
 include("gcp.jl")
 
 
+"""
+    CloudBase.prerequest(method::String)
+
+Hook called once before each cloud request. The default is a no-op; add a method to
+observe requests. Previously configured through `PREREQUEST_CALLBACK[]`, which required
+a `FunctionWrapper` to stay type stable - a plain function needs no such indirection and
+stays resolvable under `--trim=safe`.
+"""
 prerequest(method::String) = nothing
-metrics(method::String, request_failed::Bool, request_retries::Int, request_duration_ms::Float64, bytes_sent::Int, bytes_received::Int, connect_errors::Int, io_errors::Int, status_errors::Int, timeout_errors::Int, connect_duration_ms::Float64, read_duration_ms::Float64, write_duration_ms::Float64) = nothing
 
-const PREREQUEST_CALLBACK = Ref{FunctionWrapper{Nothing, Tuple{String}}}()
-const METRICS_CALLBACK = Ref{FunctionWrapper{Nothing, Tuple{String, Bool, Int64, Float64, Int64, Int64, Int64, Int64, Int64, Int64, Float64, Float64, Float64}}}()
+"""
+    CloudBase.metrics(method, request_failed, request_retries, request_duration_ms,
+                      bytes_sent, bytes_received, status)
 
-function cloudmetricslayer(handler)
-    function cloudmetrics(req; logexceptionalduration::Int=0, kw...)
-        failed = false
-        bytes_sent = bytes_received = connect_errors = io_errors = status_errors = timeout_errors = 0
-        connect_duration_ms = read_duration_ms = write_duration_ms = 0.0
-        start = time()
-        PREREQUEST_CALLBACK[](req.method)
-        try
-            resp = handler(req; kw...)
-            bytes_received = get(req.context, :nbytes, 0)
-            bytes_sent = get(req.context, :nbytes_written, 0)
-            read_duration_ms = get(req.context, :read_duration_ms, 0.0)
-            write_duration_ms = get(req.context, :write_duration_ms, 0.0)
-            return resp
-        catch
-            failed = true
-            rethrow()
-        finally
-            retries = get(req.context, :retryattempt, 0)
-            connect_errors = get(req.context, :connect_errors, 0)
-            io_errors = get(req.context, :io_errors, 0)
-            status_errors = get(req.context, :status_errors, 0)
-            timeout_errors = get(req.context, :timeout_errors, 0)
-            connect_duration_ms = get(req.context, :connect_duration_ms, 0.0)
-            dur = (time() - start) * 1000
-            if logexceptionalduration > 0 && div(dur, 1000) > logexceptionalduration
-                @warn "Exceptionally long cloud request:" total_duration_ms=dur method=req.method context=req.context
-            end
-            METRICS_CALLBACK[](req.method, failed, retries, dur, bytes_sent, bytes_received,
-                connect_errors, io_errors, status_errors, timeout_errors,
-                connect_duration_ms, read_duration_ms, write_duration_ms)
-        end
-    end
+Hook called once after each cloud request completes. The default is a no-op; add a method
+to record metrics.
+
+The HTTP 1 client exposed per-connection counters through `req.context`; the HTTP 2 client
+does not populate that, so the error-category counters and connect/read/write durations the
+old signature carried are no longer obtainable and have been dropped rather than reported
+as zeros.
+"""
+metrics(method::String, request_failed::Bool, request_retries::Int, request_duration_ms::Float64, bytes_sent::Int, bytes_received::Int, status::Int) = nothing
+
+mutable struct CloudRequestStats
+    start::Float64
+    retries::Int
+    bytes_sent::Int
+    bytes_received::Int
+    status::Int
 end
 
-# custom stream layer to be included right before actual request
-# is sent to ensure header timestamps are as correct as possible
-function cloudsignlayer(handler)
-    function cloudsign(stream; aws::Bool=false, awsv2::Bool=false, azure::Bool=false, gcp::Bool=false, kw...)
-        req = stream.message.request
-        if awsv2
-            awssignv2!(req; kw...)
-        elseif aws
-            awssign!(req; kw...)
+CloudRequestStats() = CloudRequestStats(time(), 0, 0, 0, 0)
+
+_content_length(x) = x === nothing ? 0 : (x isa Integer ? Int(x) : 0)
+
+"""
+    cloudlayer(provider::Symbol)
+
+Client middleware that installs an HTTP 2 `trace` callback which signs every request
+attempt and records metrics.
+
+Signing happens on `RequestEvent`, which HTTP emits immediately before *each* attempt,
+so a retried request is re-signed with a fresh timestamp - the same guarantee the HTTP 1
+stream layer provided. `HTTP.Request` no longer carries a `.url`, so the absolute URL is
+taken from the event.
+"""
+function cloudlayer(provider::Symbol)
+    return function(handler)
+        return function(method, url, headers=Pair{String,String}[], body=nothing;
+                        credentials=nothing, trace=nothing, logexceptionalduration::Int=0, kw...)
+            stats = CloudRequestStats()
+            prerequest(String(method))
+            tracer = function(ev)
+                if ev isa HTTP.RequestEvent
+                    uri = URI(ev.url)
+                    if provider === :aws
+                        awssign!(ev.request, uri; credentials, kw...)
+                    elseif provider === :awsv2
+                        awssignv2!(ev.request, uri; credentials, kw...)
+                    elseif provider === :azure
+                        azuresign!(ev.request, uri; credentials, kw...)
+                    elseif provider === :gcp
+                        gcpsign!(ev.request, uri; credentials, kw...)
+                    end
+                    stats.bytes_sent = _content_length(ev.request.content_length)
+                elseif ev isa HTTP.RetryEvent
+                    stats.retries += 1
+                elseif ev isa HTTP.ResponseHeadEvent
+                    stats.status = ev.response.status
+                    stats.bytes_received = _content_length(ev.response.content_length)
+                elseif ev isa HTTP.DoneEvent
+                    dur = (time() - stats.start) * 1000
+                    if logexceptionalduration > 0 && div(dur, 1000) > logexceptionalduration
+                        @warn "Exceptionally long cloud request:" total_duration_ms=dur method=method url=ev.url
+                    end
+                    metrics(String(method), ev.err !== nothing, stats.retries, dur,
+                            stats.bytes_sent, stats.bytes_received, stats.status)
+                end
+                # compose with any caller-supplied trace rather than displacing it
+                trace === nothing || trace(ev)
+                return nothing
+            end
+            return handler(method, url, headers, body; trace=tracer, kw...)
         end
-        azure && azuresign!(req; kw...)
-        gcp && gcpsign!(req; kw...)
-        return handler(stream; kw...)
     end
 end
 
@@ -119,11 +159,9 @@ just like the `HTTP` equivalents and supports all the same keyword arguments.
 module AWS
 
 using HTTP
-import ..cloudsignlayer, ..cloudmetricslayer, ..AWSCredentials, ..AbstractStore, ..AWS_DEFAULT_REGION
+import ..cloudlayer, ..AWSCredentials, ..AbstractStore, ..AWS_DEFAULT_REGION
 
-awslayer(handler) = (req; kw...) -> handler(req; kw..., aws=true, readtimeout=300)
-
-HTTP.@client (first=(awslayer, cloudmetricslayer), last=()) (first=(), last=(cloudsignlayer,))
+HTTP.@client (cloudlayer(:aws),)
 
 const DOCS = """
     AWS.get(url, headers, body; credentials, awsv2=false, kw...)
@@ -196,11 +234,9 @@ just like the `HTTP` equivalents and supports all the same keyword arguments.
 module Azure
 
 using HTTP
-import ..cloudsignlayer, ..cloudmetricslayer, ..AzureCredentials, ..AbstractStore
+import ..cloudlayer, ..AzureCredentials, ..AbstractStore
 
-azurelayer(handler) = (req; kw...) -> handler(req; azure=true, aws=false, awsv2=false, readtimeout=300, require_ssl_verification=req.url.host != "127.0.0.1", kw...)
-
-HTTP.@client (first=(azurelayer, cloudmetricslayer), last=()) (first=(), last=(cloudsignlayer,))
+HTTP.@client (cloudlayer(:azure),)
 
 const DOCS = """
     Azure.get(url, headers, body; credentials, kw...)
@@ -268,11 +304,9 @@ the `HTTP` equivalents and support all the same keyword arguments.
 module GCP
 
 using HTTP
-import ..cloudsignlayer, ..cloudmetricslayer, ..GCPCredentials, ..AbstractStore
+import ..cloudlayer, ..GCPCredentials, ..AbstractStore
 
-gcplayer(handler) = (req; kw...) -> handler(req; gcp=true, aws=false, awsv2=false, azure=false, readtimeout=300, kw...)
-
-HTTP.@client (first=(gcplayer, cloudmetricslayer), last=()) (first=(), last=(cloudsignlayer,))
+HTTP.@client (cloudlayer(:gcp),)
 
 const DOCS = """
     GCP.get(url, headers, body; credentials, kw...)
@@ -333,11 +367,5 @@ end
 end # module GCP
 
 include("CloudTest.jl")
-
-function __init__()
-    PREREQUEST_CALLBACK[] = prerequest
-    METRICS_CALLBACK[] = metrics
-    return
-end
 
 end # module CloudBase

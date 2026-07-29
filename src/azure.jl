@@ -156,7 +156,7 @@ function combineParams(pairs)
     return String(take!(io))
 end
 
-function azuresign!(request::HTTP.Request; credentials=nothing, addMd5::Bool=true, kw...)
+function azuresign!(request::HTTP.Request, url::URI; credentials=nothing, addMd5::Bool=true, kw...)
     # if credentials not provided, assume public access
     credentials === nothing && return
     # we're going to set Authorization header, so delete it if present
@@ -176,14 +176,12 @@ function azuresign!(request::HTTP.Request; credentials=nothing, addMd5::Bool=tru
         HTTP.setheader(request, "Authorization" => "Bearer $(creds.token)")
         return
     elseif creds isa SASToken
-        url = request.url
         query = URIs.queryparampairs(url)
         toks = URIs.queryparampairs(creds.token)
         for pair in toks
             HTTP.setbyfirst(query, pair)
         end
-        request.url = URI(url; query)
-        request.target = HTTP.resource(request.url)
+        request.target = HTTP.resource(URI(url; query))
         return
     end
 
@@ -193,9 +191,9 @@ function azuresign!(request::HTTP.Request; credentials=nothing, addMd5::Bool=tru
     msheaders = filter(x -> startswith(lowercase(x.first), "x-ms-"), request.headers)
     headers = sort!(map(x -> lowercase(x.first) => trimall2(x.second), msheaders), by=x->x.first)
     canonicalHeaders = join(map(x -> "$(x.first):$(x.second)", headers), "\n")
-    pairs = sort!(map(x -> lowercase(x.first) => x.second, queryparampairs(request.url)), by=x->x.first)
+    pairs = sort!(map(x -> lowercase(x.first) => x.second, queryparampairs(url)), by=x->x.first)
     canonicalQueryString = combineParams(pairs)
-    path = isempty(request.url.path) ? "/" : request.url.path
+    path = isempty(url.path) ? "/" : url.path
     canonicalResource = "/$(creds.account)$(path)$canonicalQueryString"
     len = HTTP.header(request, "Content-Length")
     stringToSign = """$(request.method)
