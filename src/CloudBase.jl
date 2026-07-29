@@ -107,23 +107,30 @@ so a retried request is re-signed with a fresh timestamp - the same guarantee th
 stream layer provided. `HTTP.Request` no longer carries a `.url`, so the absolute URL is
 taken from the event.
 """
+# Kwargs consumed by the signers rather than by HTTP. In HTTP 1 the layers absorbed
+# these; HTTP 2 validates its keyword arguments, so they must be split out explicitly.
+const SIGNING_KWARGS = (:service, :region, :x_amz_date, :includeContentSha256, :debug,
+                        :version, :timestamp, :addMd5)
+
 function cloudlayer(provider::Symbol)
     return function(handler)
         return function(method, url, headers=Pair{String,String}[], body=nothing;
                         credentials=nothing, trace=nothing, logexceptionalduration::Int=0, kw...)
+            signkw = NamedTuple(k => v for (k, v) in pairs(kw) if k in SIGNING_KWARGS)
+            httpkw = NamedTuple(k => v for (k, v) in pairs(kw) if !(k in SIGNING_KWARGS))
             stats = CloudRequestStats()
             prerequest(String(method))
             tracer = function(ev)
                 if ev isa HTTP.RequestEvent
                     uri = URI(ev.url)
                     if provider === :aws
-                        awssign!(ev.request, uri; credentials, kw...)
+                        awssign!(ev.request, uri; credentials, signkw...)
                     elseif provider === :awsv2
-                        awssignv2!(ev.request, uri; credentials, kw...)
+                        awssignv2!(ev.request, uri; credentials, signkw...)
                     elseif provider === :azure
-                        azuresign!(ev.request, uri; credentials, kw...)
+                        azuresign!(ev.request, uri; credentials, signkw...)
                     elseif provider === :gcp
-                        gcpsign!(ev.request, uri; credentials, kw...)
+                        gcpsign!(ev.request, uri; credentials, signkw...)
                     end
                     stats.bytes_sent = _content_length(ev.request.content_length)
                 elseif ev isa HTTP.RetryEvent
@@ -143,7 +150,7 @@ function cloudlayer(provider::Symbol)
                 trace === nothing || trace(ev)
                 return nothing
             end
-            return handler(method, url, headers, body; trace=tracer, kw...)
+            return handler(method, url, headers, body; trace=tracer, httpkw...)
         end
     end
 end

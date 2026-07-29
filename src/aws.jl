@@ -410,7 +410,10 @@ function awssignv2!(request::HTTP.Request, url::URI; credentials::Union{Nothing,
         request.target = (isempty(url.path) ? "/" : url.path) * "?" * HTTP.escapeuri(sorted)
     else
         params["Signature"] = signature
-        request.body = HTTP.BytesBody(Vector{UInt8}(codeunits(HTTP.escapeuri(params))))
+        # HTTP 2 parameterises Request on its body type, so the body cannot be replaced
+        # in place. Return the signed form-encoded body for the caller to send.
+        return HTTP.escapeuri(params)
     end
+    return nothing
     return
 end

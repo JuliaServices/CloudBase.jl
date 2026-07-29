@@ -79,11 +79,12 @@ end
     req = HTTP.Request("GET", "/?Action=DescribeJobFlows")
     credentials = CloudBase.AWSCredentials("AKIAIOSFODNN7EXAMPLE", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY")
     CloudBase.awssignv2!(req, HTTP.URI("https://elasticmapreduce.amazonaws.com?Action=DescribeJobFlows"); credentials, timestamp=DateTime(2011, 10, 3, 15, 19, 30), version="2009-03-31")
+    # origin-form request targets must carry a path; HTTP 1 emitted a bare "?query"
     @test req.target ==
-        "?AWSAccessKeyId=AKIAIOSFODNN7EXAMPLE&Action=DescribeJobFlows&SignatureMethod=HmacSHA256&SignatureVersion=2&Timestamp=2011-10-03T15%3A19%3A30&Version=2009-03-31&Signature=i91nKc4PWAt0JJIdXwz9HxZCJDdiy6cf%2FMj6vPxyYIs%3D"
+        "/?AWSAccessKeyId=AKIAIOSFODNN7EXAMPLE&Action=DescribeJobFlows&SignatureMethod=HmacSHA256&SignatureVersion=2&Timestamp=2011-10-03T15%3A19%3A30&Version=2009-03-31&Signature=i91nKc4PWAt0JJIdXwz9HxZCJDdiy6cf%2FMj6vPxyYIs%3D"
     req = HTTP.Request("POST", "/", Pair{String,String}[], HTTP.escapeuri(Dict("Action" => "DescribeJobFlows")))
-    CloudBase.awssignv2!(req, HTTP.URI("https://elasticmapreduce.amazonaws.com"); credentials, timestamp=DateTime(2011, 10, 3, 15, 19, 30), version="2009-03-31")
-    signed = HTTP.URIs.queryparams(HTTP.URI("?" * String(copy(CloudBase.requestbodybytes(req)))))
+    signed_body = CloudBase.awssignv2!(req, HTTP.URI("https://elasticmapreduce.amazonaws.com"); credentials, timestamp=DateTime(2011, 10, 3, 15, 19, 30), version="2009-03-31")
+    signed = HTTP.URIs.queryparams(HTTP.URI("?" * signed_body))
     @test signed["Signature"] == "wseguMzBRgA/4/fan8ZwEa0PIF+ws4WFbTJcG1ts5RY="
 end
 
