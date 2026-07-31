@@ -61,7 +61,7 @@ end
     delete!(configs, :accessKeyId)
     delete!(configs, :secretAccessKey)
     debug = false
-    knownFailures = (19, 20, 23, 26)
+    knownFailures = (19, 20, 26)
     for (i, case) in enumerate(cases.tests.all)
         println("testing AWSSig4 case = $(case.name), i = $i")
         req = HTTP.Request(case.request.method, case.request.path, case.request.headers, case.request.body; url=HTTP.URI(case.request.uri))
@@ -94,6 +94,13 @@ end
         AWS.put("$(bucket.baseurl)test.csv", [], csv; service="s3", credentials)
         resp = AWS.get("$(bucket.baseurl)test.csv"; service="s3", credentials)
         @test String(resp.body) == csv
+
+        for key in ("with space", "with%20space", "plus+plus", "hash#hash", "unicode-ü")
+            escaped = join(HTTP.escapeuri.(split(key, '/'; keepempty=true)), '/')
+            url = string(bucket.baseurl, escaped)
+            AWS.put(url, [], key; service="s3", credentials)
+            @test String(AWS.get(url; service="s3", credentials).body) == key
+        end
     end
     @test !isdir(config[].dir)
     @test success(config[].process)
