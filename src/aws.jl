@@ -335,7 +335,15 @@ function awssign!(request::HTTP.Request; service=nothing, region=nothing, creden
     # https://docs.aws.amazon.com/general/latest/gr/sigv4_signing.html
     # Task 1: Create a canonical request for Signature Version 4
     service = lowercase(service)
-    canonicalURI = URIs.normpath((service == "s3" || service == "service") ? uriencode(request.url.path, true) : escapepath(request.url.path))
+    request_path = isempty(request.url.path) ? "/" : request.url.path
+    canonicalURI = if service == "s3"
+        # Request URLs contain an escaped path. Decode it before applying SigV4
+        # encoding so `%20` is signed as `%20`, not `%2520`. Do not normalize
+        # S3 paths because repeated slashes and dot segments are object-key data.
+        uriencode(URIs.unescapeuri(request_path), true)
+    else
+        URIs.normpath(service == "service" ? uriencode(request_path, true) : escapepath(request_path))
+    end
     # @show canonicalURI
     canonicalQueryString = join((string(uriencode(k), "=", uriencode(v)) for (k, v) in sort!(queryparampairs(request.url); by=x->"$(x[1])$(x[2])")), "&")
     # @show request.url, queryparampairs(request.url), canonicalQueryString
