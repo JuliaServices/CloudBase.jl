@@ -17,11 +17,16 @@ using CloudBase
 ```
 to load the package.
 
-CloudBase requires Julia 1.10 or later and HTTP.jl 2.6 or later. Authenticated
-requests use HTTP/1.1 by default because HTTP.jl 2.6 does not preserve
-trace-time signing changes when automatic HTTP/2 negotiation falls back to
-HTTP/1.1. You can pass `protocol=:h2` when the target endpoint supports HTTP/2.
-Public requests keep HTTP.jl's automatic protocol selection.
+CloudBase requires Julia 1.10 or later and HTTP.jl 2.6.1 or later. HTTP.jl
+2.6.1 preserves trace-time signing changes when automatic HTTP/2 negotiation
+falls back to HTTP/1.1. Authenticated and public requests therefore use
+automatic protocol selection. You can pass `protocol=:h1` or `protocol=:h2`
+to require one protocol.
+
+Authenticated `open` supports bodyless `GET` and `HEAD` requests. It disables
+automatic redirects because HTTP.jl's streaming API cannot re-sign a changed
+redirect URL. Make a new signed request to the redirect target instead. Use the
+`open do` form when the metrics callback must observe request completion.
 
 ## Overview 
 

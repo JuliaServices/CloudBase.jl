@@ -91,7 +91,7 @@ end
 @testset "AWSSigV2 client" begin
     port, socket = Sockets.listenany(IPv4(0), rand(RandomDevice(), 10000:50000))
     close(socket)
-    requests = Channel{Any}(2)
+    requests = Channel{Any}(3)
     server = HTTP.serve!("127.0.0.1", port) do request
         put!(requests, (target=request.target, body=String(request.body)))
         return HTTP.Response(200, "ok")
@@ -124,6 +124,20 @@ end
         post_params = Dict(URIs.queryparampairs(URIs.URI("?" * post_request.body)))
         @test post_params["Action"] == "DescribeJobFlows"
         @test haskey(post_params, "Signature")
+
+        AWS.post(
+            "http://127.0.0.1:$port/",
+            [],
+            "Action=DescribeJobFlows";
+            credentials,
+            awsv2=true,
+            timestamp,
+            version="2009-03-31",
+        )
+        string_post = take!(requests)
+        string_post_params = Dict(URIs.queryparampairs(URIs.URI("?" * string_post.body)))
+        @test string_post_params["Action"] == "DescribeJobFlows"
+        @test haskey(string_post_params, "Signature")
     finally
         close(server)
     end
@@ -138,6 +152,13 @@ end
         AWS.put("$(bucket.baseurl)test.csv", [], csv; service="s3", credentials)
         resp = AWS.get("$(bucket.baseurl)test.csv"; service="s3", credentials)
         @test String(resp.body) == csv
+
+        for key in ("with space", "with%20space", "plus+plus", "hash#hash", "unicode-ü")
+            escaped = join(HTTP.escapeuri.(split(key, '/'; keepempty=true)), '/')
+            url = string(bucket.baseurl, escaped)
+            AWS.put(url, [], key; service="s3", credentials)
+            @test String(AWS.get(url; service="s3", credentials).body) == key
+        end
     end
     @test !isdir(config[].dir)
     @test success(config[].process)
@@ -341,6 +362,13 @@ end
             "http://127.0.0.1:$port/unsupported";
             credentials=aws_credentials,
             service="s3",
+        )
+        @test_throws ArgumentError AWS.open(
+            "GET",
+            "http://127.0.0.1:$port/redirect";
+            credentials=aws_credentials,
+            service="s3",
+            redirect=true,
         )
     finally
         close(server)
@@ -684,7 +712,9 @@ end
 
             streamed = Ref("")
             AWS.open("GET", "$(bucket.baseurl)test.csv"; service="s3", credentials) do stream
+                @test length(metric_calls) == 2
                 streamed[] = String(read(stream))
+                @test length(metric_calls) == 2
             end
             @test streamed[] == csv
             @test prereq_ref[] == 3
@@ -861,6 +891,14 @@ end
     empty_headers = Pair{String,String}[]
     @test CloudBase.deduplicateHeaders!(empty_headers) === nothing
     @test isempty(empty_headers)
+
+    buffered = HTTP.BytesBody(Vector{UInt8}(codeunits("payload")))
+    buffered.next_index = 3
+    buffered_request = HTTP.Request("POST", "/"; body=buffered)
+    @test String(CloudBase.requestbodybytes(buffered_request)) == "yload"
+    streaming = HTTP.CallbackBody(_ -> 0, () -> nothing)
+    streaming_request = HTTP.Request("POST", "/"; body=streaming)
+    @test_throws ArgumentError CloudBase.requestbodybytes(streaming_request)
 
     # STS parameters accept the non-String values the AssumeRole paths supply
     params = CloudBase.sts_params("arn:aws:iam::123456789012:role/demo")

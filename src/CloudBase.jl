@@ -49,11 +49,15 @@ expired(x) = x.expiration !== nothing && Dates.now(Dates.UTC) > (x.expiration - 
 # HTTP 2 request bodies are typed objects rather than raw bytes, and `HTTP.isbytes`
 # no longer exists. Signing needs the payload bytes for its SHA-256/HMAC.
 requestbodybytes(request::HTTP.Request) = bodybytes(request.body)
-bodybytes(body::HTTP.BytesBody) = body.data
+bodybytes(body::HTTP.BytesBody) = copy(body)
 bodybytes(::HTTP.EmptyBody) = UInt8[]
 bodybytes(body::AbstractVector{UInt8}) = body
 bodybytes(body::AbstractString) = Vector{UInt8}(codeunits(String(body)))
-bodybytes(body) = Vector{UInt8}(codeunits(HTTP.escapeuri(body)))
+function bodybytes(body)
+    throw(ArgumentError(
+        "cloud request signing requires a buffered request body; got $(typeof(body))",
+    ))
+end
 
 include("aws.jl")
 include("azure.jl")
@@ -71,10 +75,12 @@ prerequest(method::String) = nothing
 """
     CloudBase.METRICS_CALLBACK[] = callback
 
-Set a callback that runs once after each cloud request. The callback keeps the
-13-argument contract from CloudBase 1.x. HTTP 2 does not expose the old
-error-category counters or connect/read/write durations, so those seven values are
-reported as zero.
+Set a callback that runs once after each buffered request and each `open do`
+request. The callback keeps the 13-argument contract from CloudBase 1.x. HTTP 2
+does not expose the old error-category counters or connect/read/write durations,
+so those seven values are reported as zero. A raw `open` stream cannot report
+completion until the caller closes it, so use the `open do` form when metrics are
+required.
 """
 metrics(method::String, request_failed::Bool, request_retries::Int, request_duration_ms::Float64, bytes_sent::Int, bytes_received::Int, connect_errors::Int, io_errors::Int, status_errors::Int, timeout_errors::Int, connect_duration_ms::Float64, read_duration_ms::Float64, write_duration_ms::Float64) = nothing
 
@@ -106,6 +112,40 @@ function reportmetrics(method, url, failed, stats, logexceptionalduration)
     return nothing
 end
 
+function cloudopen_do(
+        f, openfn, method, url, headers;
+        status_exception::Bool=true, kw...)
+    stats = CloudRequestStats()
+    failed = false
+    stream = nothing
+    try
+        stream = openfn(method, url, headers; kw...)
+        callback_error = nothing
+        try
+            f(stream)
+        catch err
+            callback_error = err
+        finally
+            try
+                Base.closewrite(stream)
+            catch
+            end
+        end
+        response = HTTP.closeread(stream)
+        stats.bytes_sent = _content_length(stream.request_body_content_length)
+        stats.bytes_received = _content_length(response.content_length)
+        status_exception && HTTP._status_throws(response) &&
+            throw(HTTP.StatusError(response))
+        callback_error === nothing || throw(callback_error)
+        return response
+    catch
+        failed = true
+        rethrow()
+    finally
+        reportmetrics(method, url, failed, stats, get(kw, :logexceptionalduration, 0))
+    end
+end
+
 """
     cloudlayer(provider::Symbol)
 
@@ -125,11 +165,6 @@ const SIGNING_KWARGS = (:service, :region, :x_amz_date, :includeContentSha256, :
 function cloudhttpkwargs(provider, uri, credentials, httpkw)
     if !haskey(httpkw, :read_idle_timeout) && !haskey(httpkw, :readtimeout)
         httpkw = merge((read_idle_timeout=300,), httpkw)
-    end
-    # HTTP 2.6 rebuilds an unsigned request when :auto falls back from h2 to h1.
-    # Keep authenticated requests on h1 unless the caller selects h2 explicitly.
-    if credentials !== nothing && !haskey(httpkw, :protocol)
-        httpkw = merge((protocol=:h1,), httpkw)
     end
     if provider === :azure && uri.host == "127.0.0.1" &&
             !haskey(httpkw, :require_ssl_verification)
@@ -201,47 +236,50 @@ function cloudopenlayer(provider::Symbol)
             httpkw = NamedTuple(k => v for (k, v) in pairs(kw) if !(k in SIGNING_KWARGS))
             uri = URI(url)
             httpkw = cloudhttpkwargs(provider, uri, credentials, httpkw)
-            stats = CloudRequestStats()
-            PREREQUEST_CALLBACK[](String(method))
-            failed = false
-            try
-                credentials === nothing &&
-                    return handler(method, url, headers; httpkw...)
-                haskey(httpkw, :query) &&
-                    throw(ArgumentError("authenticated cloud open requires query parameters in the URL"))
-                method_string = uppercase(String(method))
-                method_string in ("GET", "HEAD") ||
-                    throw(ArgumentError("authenticated cloud open supports only bodyless GET and HEAD requests"))
-                host = isempty(uri.port) ? String(uri.host) : "$(uri.host):$(uri.port)"
-                path = isempty(uri.path) ? "/" : String(uri.path)
-                target = isempty(uri.query) ? path : "$path?$(uri.query)"
-                request = HTTP.Request(
-                    method_string,
-                    target;
-                    headers,
-                    body=UInt8[],
-                    host,
-                )
-                if provider === :aws && awsv2
-                    method_string == "GET" ||
-                        throw(ArgumentError("AWS SigV2 cloud open supports only GET requests"))
-                    awssignv2!(request, uri; credentials, signkw...)
-                elseif provider === :aws
-                    awssign!(request, uri; credentials, signkw...)
-                elseif provider === :azure
-                    azuresign!(request, uri; credentials, signkw...)
-                elseif provider === :gcp
-                    gcpsign!(request, uri; credentials, signkw...)
+            if credentials !== nothing
+                if haskey(httpkw, :redirect)
+                    httpkw.redirect === true && throw(ArgumentError(
+                        "authenticated cloud open does not support redirects; " *
+                        "make a new signed request to the redirect target",
+                    ))
+                else
+                    # HTTP.open cannot install a per-attempt trace signer. A redirect
+                    # changes the canonical URL and would reuse a stale signature.
+                    httpkw = merge((redirect=false,), httpkw)
                 end
-                target_uri = URI(request.target)
-                signed_url = URI(uri; path=target_uri.path, query=target_uri.query, fragment="")
-                return handler(method, signed_url, collect(request.headers); httpkw...)
-            catch
-                failed = true
-                rethrow()
-            finally
-                reportmetrics(method, url, failed, stats, logexceptionalduration)
             end
+            PREREQUEST_CALLBACK[](String(method))
+            credentials === nothing &&
+                return handler(method, url, headers; httpkw...)
+            haskey(httpkw, :query) &&
+                throw(ArgumentError("authenticated cloud open requires query parameters in the URL"))
+            method_string = uppercase(String(method))
+            method_string in ("GET", "HEAD") ||
+                throw(ArgumentError("authenticated cloud open supports only bodyless GET and HEAD requests"))
+            host = isempty(uri.port) ? String(uri.host) : "$(uri.host):$(uri.port)"
+            path = isempty(uri.path) ? "/" : String(uri.path)
+            target = isempty(uri.query) ? path : "$path?$(uri.query)"
+            request = HTTP.Request(
+                method_string,
+                target;
+                headers,
+                body=UInt8[],
+                host,
+            )
+            if provider === :aws && awsv2
+                method_string == "GET" ||
+                    throw(ArgumentError("AWS SigV2 cloud open supports only GET requests"))
+                awssignv2!(request, uri; credentials, signkw...)
+            elseif provider === :aws
+                awssign!(request, uri; credentials, signkw...)
+            elseif provider === :azure
+                azuresign!(request, uri; credentials, signkw...)
+            elseif provider === :gcp
+                gcpsign!(request, uri; credentials, signkw...)
+            end
+            target_uri = URI(request.target)
+            signed_url = URI(uri; path=target_uri.path, query=target_uri.query, fragment="")
+            return handler(method, signed_url, collect(request.headers); httpkw...)
         end
     end
 end
@@ -257,9 +295,16 @@ just like the `HTTP` equivalents and supports all the same keyword arguments.
 module AWS
 
 using HTTP
-import ..cloudlayer, ..cloudopenlayer, ..AWSCredentials, ..AbstractStore, ..AWS_DEFAULT_REGION
+import ..cloudlayer, ..cloudopenlayer, ..cloudopen_do, ..AWSCredentials, ..AbstractStore, ..AWS_DEFAULT_REGION
 
 HTTP.@client (cloudlayer(:aws),) (cloudopenlayer(:aws),)
+
+function open(
+        f::Function, method::Union{AbstractString, Symbol},
+        url::Union{AbstractString, HTTP.URI}, headers=Pair{String, String}[];
+        status_exception::Bool=true, kw...)
+    return cloudopen_do(f, open, method, url, headers; status_exception, kw...)
+end
 
 const DOCS = """
     AWS.get(url, headers, body; credentials, awsv2=false, kw...)
@@ -332,9 +377,16 @@ just like the `HTTP` equivalents and supports all the same keyword arguments.
 module Azure
 
 using HTTP
-import ..cloudlayer, ..cloudopenlayer, ..AzureCredentials, ..AbstractStore
+import ..cloudlayer, ..cloudopenlayer, ..cloudopen_do, ..AzureCredentials, ..AbstractStore
 
 HTTP.@client (cloudlayer(:azure),) (cloudopenlayer(:azure),)
+
+function open(
+        f::Function, method::Union{AbstractString, Symbol},
+        url::Union{AbstractString, HTTP.URI}, headers=Pair{String, String}[];
+        status_exception::Bool=true, kw...)
+    return cloudopen_do(f, open, method, url, headers; status_exception, kw...)
+end
 
 const DOCS = """
     Azure.get(url, headers, body; credentials, kw...)
@@ -402,9 +454,16 @@ the `HTTP` equivalents and support all the same keyword arguments.
 module GCP
 
 using HTTP
-import ..cloudlayer, ..cloudopenlayer, ..GCPCredentials, ..AbstractStore
+import ..cloudlayer, ..cloudopenlayer, ..cloudopen_do, ..GCPCredentials, ..AbstractStore
 
 HTTP.@client (cloudlayer(:gcp),) (cloudopenlayer(:gcp),)
+
+function open(
+        f::Function, method::Union{AbstractString, Symbol},
+        url::Union{AbstractString, HTTP.URI}, headers=Pair{String, String}[];
+        status_exception::Bool=true, kw...)
+    return cloudopen_do(f, open, method, url, headers; status_exception, kw...)
+end
 
 const DOCS = """
     GCP.get(url, headers, body; credentials, kw...)

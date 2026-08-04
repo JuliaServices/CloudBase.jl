@@ -402,9 +402,10 @@ function awssign!(request::HTTP.Request, url::URI; service=nothing, region=nothi
     service = lowercase(service)
     request_path = isempty(url.path) ? "/" : url.path
     canonicalURI = if service == "s3"
-        # S3 object keys may contain repeated slashes and dot segments; normalizing
-        # them signs a different object than the one the caller requested.
-        uriencode(request_path, true)
+        # Request URLs contain an escaped path. Decode it before applying SigV4
+        # encoding so `%20` is signed as `%20`, not `%2520`. Do not normalize
+        # S3 paths because repeated slashes and dot segments are object-key data.
+        uriencode(URIs.unescapeuri(request_path), true)
     else
         URIs.normpath(service == "service" ? uriencode(request_path, true) : escapepath(request_path))
     end
