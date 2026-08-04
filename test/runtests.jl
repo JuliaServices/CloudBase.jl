@@ -1,6 +1,6 @@
 using CloudBase, Test, CloudBase.CloudTest, JSON3, JSON, Dates, HTTP, OpenSSL
 using CloudBase: AWS, Azure, GCP
-using Sockets, Random
+using Sockets, Random, URIs, Base64
 
 const x32bit = Sys.WORD_SIZE == 32
 
@@ -64,8 +64,9 @@ end
     knownFailures = (19, 20, 26)
     for (i, case) in enumerate(cases.tests.all)
         println("testing AWSSig4 case = $(case.name), i = $i")
-        req = HTTP.Request(case.request.method, case.request.path, case.request.headers, case.request.body; url=HTTP.URI(case.request.uri))
-        CloudBase.awssign!(req; x_amz_date=DateTime(2015, 8, 30, 12, 36), includeContentSha256=false, debug=debug, configs...)
+        hdrs = Pair{String,String}[String(h[1]) => String(h[2]) for h in case.request.headers]
+        req = HTTP.Request(case.request.method, case.request.path, hdrs, case.request.body)
+        CloudBase.awssign!(req, HTTP.URI(case.request.uri); x_amz_date=DateTime(2015, 8, 30, 12, 36), includeContentSha256=false, debug=debug, configs...)
         if i in knownFailures
             @test_broken HTTP.header(req, "Authorization") == case.authz
         else
@@ -75,14 +76,71 @@ end
 end
 
 @testset "AWSSigV2" begin
-    req = HTTP.Request("GET", "/?Action=DescribeJobFlows"; url=HTTP.URI("https://elasticmapreduce.amazonaws.com?Action=DescribeJobFlows"))
+    req = HTTP.Request("GET", "/?Action=DescribeJobFlows")
     credentials = CloudBase.AWSCredentials("AKIAIOSFODNN7EXAMPLE", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY")
-    CloudBase.awssignv2!(req; credentials, timestamp=DateTime(2011, 10, 3, 15, 19, 30), version="2009-03-31")
+    CloudBase.awssignv2!(req, HTTP.URI("https://elasticmapreduce.amazonaws.com?Action=DescribeJobFlows"); credentials, timestamp=DateTime(2011, 10, 3, 15, 19, 30), version="2009-03-31")
+    # origin-form request targets must carry a path; HTTP 1 emitted a bare "?query"
     @test req.target ==
-        "?AWSAccessKeyId=AKIAIOSFODNN7EXAMPLE&Action=DescribeJobFlows&SignatureMethod=HmacSHA256&SignatureVersion=2&Timestamp=2011-10-03T15%3A19%3A30&Version=2009-03-31&Signature=i91nKc4PWAt0JJIdXwz9HxZCJDdiy6cf%2FMj6vPxyYIs%3D"
-    req = HTTP.Request("POST", "/", [], Dict("Action" => "DescribeJobFlows"); url=HTTP.URI("https://elasticmapreduce.amazonaws.com"))
-    CloudBase.awssignv2!(req; credentials, timestamp=DateTime(2011, 10, 3, 15, 19, 30), version="2009-03-31")
-    @test req.body["Signature"] == "wseguMzBRgA/4/fan8ZwEa0PIF+ws4WFbTJcG1ts5RY="
+        "/?AWSAccessKeyId=AKIAIOSFODNN7EXAMPLE&Action=DescribeJobFlows&SignatureMethod=HmacSHA256&SignatureVersion=2&Timestamp=2011-10-03T15%3A19%3A30&Version=2009-03-31&Signature=i91nKc4PWAt0JJIdXwz9HxZCJDdiy6cf%2FMj6vPxyYIs%3D"
+    req = HTTP.Request("POST", "/", Pair{String,String}[], HTTP.escapeuri(Dict("Action" => "DescribeJobFlows")))
+    signed_body = CloudBase.awssignv2!(req, HTTP.URI("https://elasticmapreduce.amazonaws.com"); credentials, timestamp=DateTime(2011, 10, 3, 15, 19, 30), version="2009-03-31")
+    signed = HTTP.URIs.queryparams(HTTP.URI("?" * signed_body))
+    @test signed["Signature"] == "wseguMzBRgA/4/fan8ZwEa0PIF+ws4WFbTJcG1ts5RY="
+end
+
+@testset "AWSSigV2 client" begin
+    port, socket = Sockets.listenany(IPv4(0), rand(RandomDevice(), 10000:50000))
+    close(socket)
+    requests = Channel{Any}(3)
+    server = HTTP.serve!("127.0.0.1", port) do request
+        put!(requests, (target=request.target, body=String(request.body)))
+        return HTTP.Response(200, "ok")
+    end
+    credentials = CloudBase.AWSCredentials("AKIAIOSFODNN7EXAMPLE", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY")
+    timestamp = DateTime(2011, 10, 3, 15, 19, 30)
+    try
+        AWS.get(
+            "http://127.0.0.1:$port/?Action=DescribeJobFlows";
+            credentials,
+            awsv2=true,
+            timestamp,
+            version="2009-03-31",
+        )
+        get_request = take!(requests)
+        get_params = Dict(URIs.queryparampairs(URIs.URI(get_request.target)))
+        @test get_params["Action"] == "DescribeJobFlows"
+        @test haskey(get_params, "Signature")
+
+        AWS.post(
+            "http://127.0.0.1:$port/",
+            [],
+            Dict("Action" => "DescribeJobFlows");
+            credentials,
+            awsv2=true,
+            timestamp,
+            version="2009-03-31",
+        )
+        post_request = take!(requests)
+        post_params = Dict(URIs.queryparampairs(URIs.URI("?" * post_request.body)))
+        @test post_params["Action"] == "DescribeJobFlows"
+        @test haskey(post_params, "Signature")
+
+        AWS.post(
+            "http://127.0.0.1:$port/",
+            [],
+            "Action=DescribeJobFlows";
+            credentials,
+            awsv2=true,
+            timestamp,
+            version="2009-03-31",
+        )
+        string_post = take!(requests)
+        string_post_params = Dict(URIs.queryparampairs(URIs.URI("?" * string_post.body)))
+        @test string_post_params["Action"] == "DescribeJobFlows"
+        @test haskey(string_post_params, "Signature")
+    finally
+        close(server)
+    end
 end
 
 @time @testset "AWS" begin
@@ -226,14 +284,14 @@ end
 
 @testset "GCP Access Token" begin
     creds = GCP.Credentials("TEST_TOKEN")
-    req = HTTP.Request("GET", "/test"; url=HTTP.URI("https://storage.googleapis.com/test-bucket/test"))
-    CloudBase.gcpsign!(req; credentials=creds)
+    req = HTTP.Request("GET", "/test")
+    CloudBase.gcpsign!(req, HTTP.URI("https://storage.googleapis.com/test-bucket/test"); credentials=creds)
     @test HTTP.header(req, "Authorization") == "Bearer TEST_TOKEN"
 
     port, socket = Sockets.listenany(IPv4(0), rand(RandomDevice(), 10000:50000))
     close(socket)
     auth_headers = Channel{String}(2)
-    server = HTTP.serve!(ip"127.0.0.1", port) do request
+    server = HTTP.serve!("127.0.0.1", port) do request
         put!(auth_headers, HTTP.header(request, "Authorization"))
         return HTTP.Response(200, "ok")
     end
@@ -245,6 +303,73 @@ end
         resp = GCP.get("http://127.0.0.1:$port/public")
         @test resp.status == 200
         @test take!(auth_headers) == ""
+    finally
+        close(server)
+    end
+end
+
+@testset "Authenticated cloud open" begin
+    port, socket = Sockets.listenany(IPv4(0), rand(RandomDevice(), 10000:50000))
+    close(socket)
+    requests = Channel{Any}(3)
+    server = HTTP.serve!("127.0.0.1", port) do request
+        put!(requests, copy(request.headers))
+        return HTTP.Response(200, "ok")
+    end
+    aws_credentials = AWS.Credentials("AWS_ACCESS_ID", "AWS_SECRET")
+    azure_credentials = Azure.Credentials(
+        "devstoreaccount1",
+        "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==",
+    )
+    gcp_credentials = GCP.Credentials("GCP_ACCESS_TOKEN")
+    try
+        aws_body = Ref("")
+        aws_response = AWS.open(
+            "GET",
+            "http://127.0.0.1:$port/aws";
+            credentials=aws_credentials,
+            service="s3",
+            region="us-east-1",
+        ) do stream
+            aws_body[] = String(read(stream))
+        end
+        @test aws_response.status == 200
+        @test aws_body[] == "ok"
+        @test startswith(HTTP.header(take!(requests), "Authorization"), "AWS4-HMAC-SHA256")
+
+        azure_response = Azure.open(
+            "HEAD",
+            "http://127.0.0.1:$port/devstoreaccount1/container";
+            credentials=azure_credentials,
+        ) do stream
+            @test isempty(read(stream))
+        end
+        @test azure_response.status == 200
+        @test startswith(HTTP.header(take!(requests), "Authorization"), "SharedKey devstoreaccount1:")
+
+        gcp_response = GCP.open(
+            "GET",
+            "http://127.0.0.1:$port/gcp";
+            credentials=gcp_credentials,
+        ) do stream
+            @test String(read(stream)) == "ok"
+        end
+        @test gcp_response.status == 200
+        @test HTTP.header(take!(requests), "Authorization") == "Bearer GCP_ACCESS_TOKEN"
+
+        @test_throws ArgumentError AWS.open(
+            "PUT",
+            "http://127.0.0.1:$port/unsupported";
+            credentials=aws_credentials,
+            service="s3",
+        )
+        @test_throws ArgumentError AWS.open(
+            "GET",
+            "http://127.0.0.1:$port/redirect";
+            credentials=aws_credentials,
+            service="s3",
+            redirect=true,
+        )
     finally
         close(server)
     end
@@ -338,8 +463,8 @@ end
             @test params["client_secret"] == "authorized-client-secret"
             @test params["refresh_token"] == "authorized-refresh-token"
 
-            req = HTTP.Request("GET", "/test"; url=HTTP.URI("https://storage.googleapis.com/test-bucket/test"))
-            CloudBase.gcpsign!(req; credentials=creds)
+            req = HTTP.Request("GET", "/test")
+            CloudBase.gcpsign!(req, HTTP.URI("https://storage.googleapis.com/test-bucket/test"); credentials=creds)
             @test HTTP.header(req, "Authorization") == "Bearer GCP_AUTHORIZED_USER_TOKEN"
             @test HTTP.header(req, "x-goog-user-project") == "billing-project"
         finally
@@ -394,8 +519,8 @@ end
                 @test impersonation_payload["scope"] == CloudBase.GCP_DEFAULT_SCOPES
                 @test impersonation_payload["lifetime"] == "1800s"
 
-                req = HTTP.Request("GET", "/test"; url=HTTP.URI("https://storage.googleapis.com/test-bucket/test"))
-                CloudBase.gcpsign!(req; credentials=creds)
+                req = HTTP.Request("GET", "/test")
+                CloudBase.gcpsign!(req, HTTP.URI("https://storage.googleapis.com/test-bucket/test"); credentials=creds)
                 @test HTTP.header(req, "x-goog-user-project") == "external-billing-project"
             end
         end
@@ -413,7 +538,7 @@ end
     )), request_ref=sts_request_ref) do sts_request_count
         port, socket = Sockets.listenany(IPv4(0), rand(RandomDevice(), 10000:50000))
         close(socket)
-        server = HTTP.serve!(ip"127.0.0.1", port) do request
+        server = HTTP.serve!("127.0.0.1", port) do request
             source_request_ref[] = (method=request.method, target=request.target, headers=copy(request.headers), body=String(request.body))
             return HTTP.Response(200, "URL_SUBJECT_TOKEN")
         end
@@ -452,14 +577,12 @@ end
 
     creds = GCP.Credentials("HMAC_ACCESS_ID", "HMAC_SECRET"; quota_project_id="test-project")
     request_time = DateTime(2026, 1, 2, 3, 4, 5)
-    req = HTTP.Request("PUT", "/test-bucket/test-object", ["Content-Type" => "text/plain"], "hello";
-        url=HTTP.URI("https://storage.googleapis.com/test-bucket/test-object"))
-    expected = HTTP.Request("PUT", "/test-bucket/test-object", ["Content-Type" => "text/plain"], "hello";
-        url=HTTP.URI("https://storage.googleapis.com/test-bucket/test-object"))
+    req = HTTP.Request("PUT", "/test-bucket/test-object", ["Content-Type" => "text/plain"], "hello")
+    expected = HTTP.Request("PUT", "/test-bucket/test-object", ["Content-Type" => "text/plain"], "hello")
 
-    CloudBase.gcpsign!(req; credentials=creds, x_amz_date=request_time)
+    CloudBase.gcpsign!(req, HTTP.URI("https://storage.googleapis.com/test-bucket/test-object"); credentials=creds, x_amz_date=request_time)
     HTTP.setheader(expected, "x-amz-project-id" => "test-project")
-    CloudBase.awssign!(expected; service="s3", region="us-east-1", credentials=CloudBase.AWSCredentials("HMAC_ACCESS_ID", "HMAC_SECRET"), x_amz_date=request_time)
+    CloudBase.awssign!(expected, HTTP.URI("https://storage.googleapis.com/test-bucket/test-object"); service="s3", region="us-east-1", credentials=CloudBase.AWSCredentials("HMAC_ACCESS_ID", "HMAC_SECRET"), x_amz_date=request_time)
 
     @test HTTP.header(req, "Authorization") == HTTP.header(expected, "Authorization")
     @test HTTP.header(req, "x-amz-date") == HTTP.header(expected, "x-amz-date")
@@ -469,7 +592,7 @@ end
     port, socket = Sockets.listenany(IPv4(0), rand(RandomDevice(), 10000:50000))
     close(socket)
     request_ref = Ref{Any}()
-    server = HTTP.serve!(ip"127.0.0.1", port) do request
+    server = HTTP.serve!("127.0.0.1", port) do request
         request_ref[] = (method=request.method, target=request.target, headers=copy(request.headers), body=String(request.body))
         return HTTP.Response(200, "ok")
     end
@@ -478,7 +601,7 @@ end
         @test resp.status == 200
         headers = headerdict(request_ref[].headers)
         @test startswith(headers["Authorization"], "AWS4-HMAC-SHA256 Credential=HMAC_ACCESS_ID/")
-        @test headers["x-amz-project-id"] == "test-project"
+        @test headers["X-Amz-Project-Id"] == "test-project"
     finally
         close(server)
     end
@@ -561,7 +684,7 @@ end
         catch e
             ex = e
         end
-        params = HTTP.URIs.queryparampairs(HTTP.URI(ex.target).query)
+        params = HTTP.URIs.queryparampairs(HTTP.URI(ex.response.request.target).query)
         @test count(x -> x[1] == "sig", params) == 1
     end
 end
@@ -571,16 +694,36 @@ end
     Minio.with(bindIP="127.0.0.1", startupDelay=0.5) do conf
         credentials, bucket = conf
         prereq_ref = Ref(0)
-        metrics_ref = Ref{Any}()
-        CloudBase.PREREQUEST_CALLBACK[] = (m) -> prereq_ref[] += 1
-        CloudBase.METRICS_CALLBACK[] = (args...) -> metrics_ref[] = args
-        csv = "a,b,c\n1,2,3\n4,5,$(rand())"
-        AWS.put("$(bucket.baseurl)test.csv", [], csv; service="s3", credentials)
-        @test prereq_ref[] == 1
-        @test metrics_ref[] isa Tuple
-        resp = AWS.get("$(bucket.baseurl)test.csv"; service="s3", credentials)
-        @test String(resp.body) == csv
-        @test prereq_ref[] == 2
+        metric_calls = Any[]
+        old_prerequest = CloudBase.PREREQUEST_CALLBACK[]
+        old_metrics = CloudBase.METRICS_CALLBACK[]
+        try
+            CloudBase.PREREQUEST_CALLBACK[] = (m) -> prereq_ref[] += 1
+            CloudBase.METRICS_CALLBACK[] = (args...) -> push!(metric_calls, args)
+            csv = "a,b,c\n1,2,3\n4,5,$(rand())"
+            AWS.put("$(bucket.baseurl)test.csv", [], csv; service="s3", credentials)
+            @test prereq_ref[] == 1
+            @test length(metric_calls) == 1
+            @test length(only(metric_calls)) == 13
+            resp = AWS.get("$(bucket.baseurl)test.csv"; service="s3", credentials)
+            @test String(resp.body) == csv
+            @test prereq_ref[] == 2
+            @test length(metric_calls) == 2
+
+            streamed = Ref("")
+            AWS.open("GET", "$(bucket.baseurl)test.csv"; service="s3", credentials) do stream
+                @test length(metric_calls) == 2
+                streamed[] = String(read(stream))
+                @test length(metric_calls) == 2
+            end
+            @test streamed[] == csv
+            @test prereq_ref[] == 3
+            @test length(metric_calls) == 3
+            @test all(call -> length(call) == 13, metric_calls)
+        finally
+            CloudBase.PREREQUEST_CALLBACK[] = old_prerequest
+            CloudBase.METRICS_CALLBACK[] = old_metrics
+        end
     end
 end
 
@@ -625,4 +768,201 @@ end
     # Unreachable network
     _, duration = @timed @test_throws Base.IOError CloudTest._connect_with_timeout("224.0.0.1", refused_port, 1)
     @test duration < 2
+end
+
+@testset "urlServiceRegion" begin
+    usr = CloudBase.urlServiceRegion
+    # documented endpoint shapes
+    @test usr("s3.amazonaws.com") == ("s3", nothing)
+    @test usr("s3.us-west-2.amazonaws.com") == ("s3", "us-west-2")
+    @test usr("bucket.s3.us-west-2.amazonaws.com") == ("s3", "us-west-2")
+    @test usr("bucket.vpce-1a2b3c4d-5e6f.s3.us-east-1.vpce.amazonaws.com") == ("s3", "us-east-1")
+    @test usr("sts.amazonaws.com") == ("sts", nothing)
+    @test usr("dynamodb.eu-central-1.amazonaws.com") == ("dynamodb", "eu-central-1")
+
+    # a bucket without a region label in the host
+    @test usr("bucket.s3.amazonaws.com") == ("s3", nothing)
+
+    # bucket names may contain dots; matching must be anchored at the end of the host
+    # so that a bucket label is never mistaken for the service or region
+    @test usr("my.bucket.s3.amazonaws.com") == ("s3", nothing)
+    @test usr("my.bucket.s3.us-west-2.amazonaws.com") == ("s3", "us-west-2")
+    @test usr("a.b.c.d.s3.ap-southeast-1.amazonaws.com") == ("s3", "ap-southeast-1")
+
+    # other partitions still parse
+    @test usr("s3.us-gov-east-1.amazonaws.com") == ("s3", "us-gov-east-1")
+    @test usr("s3.cn-north-1.amazonaws.com.cn") == ("s3", "cn-north-1")
+    @test usr("bucket.s3.cn-northwest-1.amazonaws.com.cn") == ("s3", "cn-northwest-1")
+
+    # endpoint modifiers do not change the SigV4 service name
+    @test usr("s3.dualstack.us-west-2.amazonaws.com") == ("s3", "us-west-2")
+    @test usr("bucket.s3.dualstack.us-west-2.amazonaws.com") == ("s3", "us-west-2")
+    @test usr("s3-fips.dualstack.us-west-2.amazonaws.com") == ("s3", "us-west-2")
+
+    # hosts we cannot infer anything from
+    @test usr("amazonaws.com") == (nothing, nothing)
+    @test usr("example.com") == (nothing, nothing)
+    @test usr("127.0.0.1") == (nothing, nothing)
+    @test usr("localhost") == (nothing, nothing)
+
+    @test CloudBase.isregionlabel("us-west-2")
+    @test CloudBase.isregionlabel("ap-southeast-1")
+    @test !CloudBase.isregionlabel("s3")
+    @test !CloudBase.isregionlabel("amazonaws")
+    @test !CloudBase.isregionlabel("my-bucket-name")
+end
+
+@testset "AWSSigV4 signing edge cases" begin
+    creds = CloudBase.AWSCredentials("AKIAIOSFODNN7EXAMPLE", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY")
+    mkreq(url; method="GET") = begin
+        uri = HTTP.URI(url)
+        host = isempty(uri.port) ? String(uri.host) : "$(uri.host):$(uri.port)"
+        path = isempty(uri.path) ? "/" : String(uri.path)
+        target = isempty(uri.query) ? path : "$path?$(uri.query)"
+        return HTTP.Request(
+            method,
+            target;
+            headers=Pair{String,String}[],
+            body=UInt8[],
+            host,
+        )
+    end
+    signreq!(request, url; kw...) = CloudBase.awssign!(request, HTTP.URI(url); kw...)
+
+    # a host we cannot derive a service from must say so, not fail later inside signing
+    err = try
+        signreq!(mkreq("https://example.com/path"), "https://example.com/path"; credentials=creds)
+    catch e
+        e
+    end
+    @test err isa ArgumentError
+    @test occursin("unable to determine AWS service", err.msg)
+    # public requests do not require endpoint inference because they are not signed
+    public_request = mkreq("https://example.com/path")
+    @test signreq!(public_request, "https://example.com/path") === nothing
+    @test isempty(HTTP.header(public_request, "Authorization"))
+    # ...and passing service explicitly works
+    r = mkreq("https://example.com/path")
+    signreq!(r, "https://example.com/path"; credentials=creds, service="s3", region="us-east-1")
+    @test occursin("AWS4-HMAC-SHA256", HTTP.header(r, "Authorization"))
+    @test occursin("SignedHeaders=host;x-amz-date", HTTP.header(r, "Authorization"))
+
+    # debug=true previously referenced undefined variables
+    r = mkreq("https://s3.us-west-2.amazonaws.com/b/k")
+    signreq!(r, "https://s3.us-west-2.amazonaws.com/b/k"; credentials=creds, debug=true)
+    @test occursin("Credential=AKIAIOSFODNN7EXAMPLE/", HTTP.header(r, "Authorization"))
+
+    # canonical query params sort by (name, value), not by their concatenation:
+    # "ab"*"c" == "a"*"bc" would otherwise make the ordering ambiguous
+    r1 = mkreq("https://s3.us-west-2.amazonaws.com/b/k?ab=c&a=bc")
+    r2 = mkreq("https://s3.us-west-2.amazonaws.com/b/k?a=bc&ab=c")
+    dt = DateTime(2024, 1, 1)
+    signreq!(r1, "https://s3.us-west-2.amazonaws.com/b/k?ab=c&a=bc"; credentials=creds, x_amz_date=dt)
+    signreq!(r2, "https://s3.us-west-2.amazonaws.com/b/k?a=bc&ab=c"; credentials=creds, x_amz_date=dt)
+    # the same query set in either order must produce the same signature
+    @test HTTP.header(r1, "Authorization") == HTTP.header(r2, "Authorization")
+
+    # Sorting happens after URI encoding: `%5B` sorts before `A`, even though the
+    # raw `[` character sorts after it.
+    encoded_order = HTTP.URI("https://s3.us-west-2.amazonaws.com/b/k?A=right&%5B=left")
+    @test CloudBase.canonicalQuery(encoded_order) == "%5B=left&A=right"
+
+    # signing is deterministic for a fixed timestamp
+    a = mkreq("https://s3.us-west-2.amazonaws.com/bucket/key")
+    b = mkreq("https://s3.us-west-2.amazonaws.com/bucket/key")
+    signreq!(a, "https://s3.us-west-2.amazonaws.com/bucket/key"; credentials=creds, x_amz_date=dt)
+    signreq!(b, "https://s3.us-west-2.amazonaws.com/bucket/key"; credentials=creds, x_amz_date=dt)
+    @test HTTP.header(a, "Authorization") == HTTP.header(b, "Authorization")
+
+    # a dotted bucket name signs against the s3 service rather than a bucket label
+    d = mkreq("https://my.bucket.s3.us-west-2.amazonaws.com/key")
+    signreq!(d, "https://my.bucket.s3.us-west-2.amazonaws.com/key"; credentials=creds, x_amz_date=dt)
+    @test occursin("/us-west-2/s3/aws4_request", HTTP.header(d, "Authorization"))
+
+    # S3 explicitly forbids path normalization because repeated slashes are part
+    # of the object key.
+    repeated = mkreq("https://s3.us-west-2.amazonaws.com/bucket/a//b")
+    collapsed = mkreq("https://s3.us-west-2.amazonaws.com/bucket/a/b")
+    signreq!(repeated, "https://s3.us-west-2.amazonaws.com/bucket/a//b"; credentials=creds, x_amz_date=dt)
+    signreq!(collapsed, "https://s3.us-west-2.amazonaws.com/bucket/a/b"; credentials=creds, x_amz_date=dt)
+    @test HTTP.header(repeated, "Authorization") != HTTP.header(collapsed, "Authorization")
+
+    # header deduplication tolerates an empty header set
+    empty_headers = Pair{String,String}[]
+    @test CloudBase.deduplicateHeaders!(empty_headers) === nothing
+    @test isempty(empty_headers)
+
+    buffered = HTTP.BytesBody(Vector{UInt8}(codeunits("payload")))
+    buffered.next_index = 3
+    buffered_request = HTTP.Request("POST", "/"; body=buffered)
+    @test String(CloudBase.requestbodybytes(buffered_request)) == "yload"
+    streaming = HTTP.CallbackBody(_ -> 0, () -> nothing)
+    streaming_request = HTTP.Request("POST", "/"; body=streaming)
+    @test_throws ArgumentError CloudBase.requestbodybytes(streaming_request)
+
+    # STS parameters accept the non-String values the AssumeRole paths supply
+    params = CloudBase.sts_params("arn:aws:iam::123456789012:role/demo")
+    params["DurationSeconds"] = 900
+    params["WebIdentityToken"] = "token-text"
+    @test params["DurationSeconds"] == 900
+    @test params["WebIdentityToken"] == "token-text"
+end
+
+@testset "Azure credential + SAS correctness" begin
+    # IMDS reports expires_on as a JSON string; Figgy parses JSON scalars as Strings,
+    # so the raw value must not reach unix2datetime directly
+    @test CloudBase.azureExpiration("1506484173") == Dates.unix2datetime(1506484173)
+    @test CloudBase.azureExpiration("") === nothing
+    @test CloudBase.azureExpiration(nothing) === nothing
+    @test CloudBase.azureExpiration(1506484173) == Dates.unix2datetime(1506484173)
+    @test CloudBase.azureExpiration(DateTime(2024, 1, 1)) == DateTime(2024, 1, 1)
+    @test_throws ArgumentError CloudBase.azureExpiration("not-a-date")
+
+    # ContentType maps to the rsct query parameter; it previously reused
+    # ContentLanguage's rscl field name, so the emitted query and the signed
+    # string-to-sign disagreed and Azure rejected the signature
+    @test fieldname(CloudBase.ContentType, 1) === :rsct
+    @test fieldname(CloudBase.ContentLanguage, 1) === :rscl
+
+    directory_url = URIs.URI("https://acct.blob.core.windows.net/cont/directory")
+    directory_resource = CloudBase.SignedResource(blob=false, directory=true)
+    @test_throws ArgumentError CloudBase.generateServiceSASToken(
+        directory_url,
+        Base64.base64encode("test-key");
+        signedResource=directory_resource,
+    )
+    directory_sas = CloudBase.generateServiceSASToken(
+        directory_url,
+        Base64.base64encode("test-key");
+        signedResource=directory_resource,
+        signedDirectoryDepth=CloudBase.SignedDirectoryDepth(2),
+    )
+    @test Dict(URIs.queryparampairs(URIs.URI("?$directory_sas")))["sdd"] == "2"
+    @test_throws ArgumentError CloudBase.SignedDirectoryDepth(-1)
+
+    # `service` sits in an optional regex group and may not participate
+    ok, service, host, account, container, blob = CloudBase.parseAzureAccountContainerBlob("azure://myaccount/mycontainer")
+    @test ok
+    @test account == "myaccount"
+    @test container == "mycontainer"
+    @test service == "blob"
+    ok2, service2, _, account2, container2, blob2 = CloudBase.parseAzureAccountContainerBlob("https://myaccount.blob.core.windows.net/cont/myblob")
+    @test ok2 && service2 == "blob" && account2 == "myaccount" && container2 == "cont" && blob2 == "myblob"
+
+    # getCanonicalizedResource returns (resource, service); callers must destructure it
+    # rather than interpolate the tuple into a string-to-sign
+    res = CloudBase.getCanonicalizedResource(URIs.URI("https://acct.blob.core.windows.net/cont/blob"))
+    @test res isa Tuple
+    @test res[1] == "/blob/acct/cont/blob"
+    @test res[2] == "blob"
+
+    # the user-delegation SAS entry points must resolve to real methods
+    @test hasmethod(CloudBase.generateUserDelegationSASToken, Tuple{String})
+    @test hasmethod(CloudBase.generateUserDelegationSASToken, Tuple{URIs.URI})
+    @test hasmethod(CloudBase.generateUserDelegationSASURI, Tuple{String})
+    @test hasmethod(CloudBase.generateUserDelegationSASURI, Tuple{URIs.URI})
+
+    # reloadAzureVMCredentials! is callable with no arguments
+    @test hasmethod(CloudBase.reloadAzureVMCredentials!, Tuple{})
+    @test hasmethod(CloudBase.reloadAzureVMCredentials!, Tuple{String})
 end

@@ -73,6 +73,20 @@ azureVMConfig() = Figgy.kmap(Figgy.EnvironmentVariables(),
     "AZURE_TOKEN_MI_RES_ID" => "mi_res_id",; select=true
 )
 
+# Azure IMDS reports `expires_on` as seconds-since-epoch, but as a JSON string; other
+# sources may supply a DateTime or nothing. Normalise all of them to Union{Nothing,DateTime}.
+azureExpiration(::Nothing) = nothing
+azureExpiration(x::DateTime) = x
+azureExpiration(x::Real) = Dates.unix2datetime(x)
+function azureExpiration(x::AbstractString)
+    isempty(x) && return nothing
+    secs = tryparse(Float64, x)
+    secs !== nothing && return Dates.unix2datetime(secs)
+    dt = tryparse(DateTime, rstrip(String(x), 'Z'))
+    dt === nothing && throw(ArgumentError("invalid Azure credential expiration: $(repr(x))"))
+    return dt
+end
+
 function azureLoadConfig!(expireThreshold=Dates.Minute(5))
     # on each fresh load, we want to clear out potentially stale credential fields
     # note that each load, we *will* replace AZURE_CONFIGS["credentials"]
@@ -94,8 +108,10 @@ function azureLoadConfig!(expireThreshold=Dates.Minute(5))
     )
     # after doing a single config "load", we want to bundle the credentials
     # together as one object in AZURE_CONFIGS, so we know they all came "together"
+    # IMDS returns expires_on as a JSON string, and Figgy parses JSON scalars as
+    # Strings, so unix2datetime must not be handed the raw value
     exp = get(AZURE_CONFIGS, "expiration", "")
-    expiration = exp === nothing ? exp : Dates.unix2datetime(exp)
+    expiration = azureExpiration(exp)
     if haskey(AZURE_CONFIGS, "sas_token")
         auth = SASToken(AZURE_CONFIGS["sas_token"])
     elseif haskey(AZURE_CONFIGS, "access_token")
@@ -130,7 +146,8 @@ function Figgy.load(x::AzureVMCredentialsSource)
         "expires_on" => "expiration",
     )
 end
-reloadAzureVMCredentials!(vmHost=nothing) = Figgy.load!(AZURE_CONFIGS, AzureVMCredentialsSource(vmHost))
+reloadAzureVMCredentials!(vmHost::String) = Figgy.load!(AZURE_CONFIGS, AzureVMCredentialsSource(vmHost))
+reloadAzureVMCredentials!() = Figgy.load!(AZURE_CONFIGS, AzureVMCredentialsSource())
 
 const AZURE_API_VERSION = "2021-04-10"
 const RFC1123Format = dateformat"e, dd u yyyy HH:MM:SS \G\M\T"
@@ -156,7 +173,7 @@ function combineParams(pairs)
     return String(take!(io))
 end
 
-function azuresign!(request::HTTP.Request; credentials=nothing, addMd5::Bool=true, kw...)
+function azuresign!(request::HTTP.Request, url::URI; credentials=nothing, addMd5::Bool=true, kw...)
     # if credentials not provided, assume public access
     credentials === nothing && return
     # we're going to set Authorization header, so delete it if present
@@ -176,14 +193,15 @@ function azuresign!(request::HTTP.Request; credentials=nothing, addMd5::Bool=tru
         HTTP.setheader(request, "Authorization" => "Bearer $(creds.token)")
         return
     elseif creds isa SASToken
-        url = request.url
         query = URIs.queryparampairs(url)
         toks = URIs.queryparampairs(creds.token)
         for pair in toks
-            HTTP.setbyfirst(query, pair)
+            i = findfirst(x -> x.first == pair.first, query)
+            i === nothing ? push!(query, pair) : (query[i] = pair)
         end
-        request.url = URI(url; query)
-        request.target = HTTP.resource(request.url)
+        signed_url = URI(url; query)
+        path = isempty(signed_url.path) ? "/" : String(signed_url.path)
+        request.target = isempty(signed_url.query) ? path : "$path?$(signed_url.query)"
         return
     end
 
@@ -193,11 +211,14 @@ function azuresign!(request::HTTP.Request; credentials=nothing, addMd5::Bool=tru
     msheaders = filter(x -> startswith(lowercase(x.first), "x-ms-"), request.headers)
     headers = sort!(map(x -> lowercase(x.first) => trimall2(x.second), msheaders), by=x->x.first)
     canonicalHeaders = join(map(x -> "$(x.first):$(x.second)", headers), "\n")
-    pairs = sort!(map(x -> lowercase(x.first) => x.second, queryparampairs(request.url)), by=x->x.first)
+    pairs = sort!(map(x -> lowercase(x.first) => x.second, queryparampairs(url)), by=x->x.first)
     canonicalQueryString = combineParams(pairs)
-    path = isempty(request.url.path) ? "/" : request.url.path
+    path = isempty(url.path) ? "/" : url.path
     canonicalResource = "/$(creds.account)$(path)$canonicalQueryString"
     len = HTTP.header(request, "Content-Length")
+    if isempty(len) && request.content_length > 0
+        len = string(request.content_length)
+    end
     stringToSign = """$(request.method)
     $(HTTP.header(request, "Content-Encoding"))
     $(HTTP.header(request, "Content-Language"))

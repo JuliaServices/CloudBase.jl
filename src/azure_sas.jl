@@ -138,7 +138,9 @@ function parseAzureAccountContainerBlob(url; parseLocal::Bool=false)
     # https://myaccount.blob.core.windows.net/mycontainer/myblob
     # https://myaccount.blob.core.windows.net/mycontainer
     m = match(r"^(https|azure)://(?<account>[^\.]+?)(\.(?<service>[^\.]+?)\.core\.windows\.net)?/(?<container>[^/]+?)(?:/(?<blob>.+))?$", url)
-    m !== nothing && return (true, String(m[:service]), nothing, String(m[:account]), String(m[:container]), String(something(m[:blob], "")))
+    # `service` sits in an optional group, so it may not participate in the match
+    # (e.g. "azure://myaccount/mycontainer"); default it rather than String(nothing)
+    m !== nothing && return (true, String(something(m[:service], "blob")), nothing, String(m[:account]), String(m[:container]), String(something(m[:blob], "")))
     if parseLocal
         # "https://127.0.0.1:45942/devstoreaccount1/jl-azurite-21807/"
         m = match(r"^(?<host>(https|azure)://[\d|\.|:]+?)/(?<account>[^/]+?)/(?<container>[^/]+?)(?:/(?<blob>.+))?$", url)
@@ -200,6 +202,10 @@ SignedResource(; container::Bool=false, blob::Bool=true, blobVersion::Bool=false
 
 struct SignedDirectoryDepth
     sdd::Int
+    function SignedDirectoryDepth(sdd::Integer)
+        sdd >= 0 || throw(ArgumentError("signed directory depth must be non-negative"))
+        return new(Int(sdd))
+    end
 end
 
 struct CacheControl
@@ -219,7 +225,10 @@ struct ContentLanguage
 end
 
 struct ContentType
-    rscl::String
+    # this is the `rsct` query parameter; naming it `rscl` collided with
+    # ContentLanguage, so a contentType was emitted under the wrong key while the
+    # string-to-sign still signed it as rsct - the signature and query disagreed
+    rsct::String
 end
 
 struct TableName
@@ -286,6 +295,8 @@ function generateServiceSASToken(url::URI, key::String;
     signedSnapshotTime=nothing)
 
     canonicalizedResource, service = getCanonicalizedResource(url)
+    str(signedResource) == "d" && signedDirectoryDepth === nothing &&
+        throw(ArgumentError("signedDirectoryDepth is required for a directory SAS"))
     if service == "queue"
         stringToSign = """$(str(signedPermission))
         $(str(signedStart))
@@ -330,9 +341,9 @@ function generateServiceSASToken(url::URI, key::String;
     # println(stringToSign)
     # @show sig
     query = URIs.queryparams(url)
-    for x in (signedVersion, signedPermission, signedStart, signedExpiry, signedIP, signedProtocol, signedEncryptionScope, signedResource, signedSnapshotTime, cacheControl, contentDisposition, contentEncoding, contentLanguage, contentType, tableName, startPk, startRk, endPk, endRk, signedIdentifier)
+    for x in (signedVersion, signedPermission, signedStart, signedExpiry, signedIP, signedProtocol, signedEncryptionScope, signedResource, signedDirectoryDepth, signedSnapshotTime, cacheControl, contentDisposition, contentEncoding, contentLanguage, contentType, tableName, startPk, startRk, endPk, endRk, signedIdentifier)
         if !isnothing(x)
-            query[String(fieldname(typeof(x), 1))] = getfield(x, 1)
+            query[String(fieldname(typeof(x), 1))] = string(getfield(x, 1))
         end
     end
     query["sig"] = sig
@@ -442,7 +453,9 @@ function generateUserDelegationSASToken(url::URI;
     signedCorrelationId=nothing,
     signedSnapshotTime=nothing, kw...)
 
-    canonicalizedResource = getCanonicalizedResource(url)
+    canonicalizedResource, _service = getCanonicalizedResource(url)
+    str(signedResource) == "d" && signedDirectoryDepth === nothing &&
+        throw(ArgumentError("signedDirectoryDepth is required for a directory SAS"))
     signedKeyObjectId,
         signedKeyTenantId,
         signedKeyStartTime,
@@ -478,15 +491,15 @@ function generateUserDelegationSASToken(url::URI;
     # println(stringToSign)
     # @show sig
     query = URIs.queryparams(url)
-    for x in (signedPermission, signedStart, signedExpiry, signedIP, signedProtocol, signedVersion, signedResource, signedSnapshotTime, signedEncryptionScope, cacheControl, contentDisposition, contentEncoding, contentLanguage, contentType, signedKeyObjectId, signedKeyTenantId, signedKeyStartTime, signedKeyExpiryTime, signedKeyService, signedKeyVersion, signedAuthorizedObjectId, signedUnauthorizedObjectId, signedCorrelationId)
+    for x in (signedPermission, signedStart, signedExpiry, signedIP, signedProtocol, signedVersion, signedResource, signedDirectoryDepth, signedSnapshotTime, signedEncryptionScope, cacheControl, contentDisposition, contentEncoding, contentLanguage, contentType, signedKeyObjectId, signedKeyTenantId, signedKeyStartTime, signedKeyExpiryTime, signedKeyService, signedKeyVersion, signedAuthorizedObjectId, signedUnauthorizedObjectId, signedCorrelationId)
         if !isnothing(x)
-            query[String(fieldname(typeof(x), 1))] = getfield(x, 1)
+            query[String(fieldname(typeof(x), 1))] = string(getfield(x, 1))
         end
     end
     query["sig"] = sig
     return URIs.escapeuri(query)
 end
 
-generateUserDelegationSASToken(uri::String, key::String; kw...) = generateUserDelegationSASToken(URI(uri), key; kw...)
-generateUserDelegationSASURI(uri::URI, key::String; kw...) = URI(uri; query=generateUserDelegationSASToken(uri, key; kw...))
-generateUserDelegationSASURI(uri::String, key::String; kw...) = generateUserDelegationSASURI(URI(uri), key; kw...)
+generateUserDelegationSASToken(uri::String; kw...) = generateUserDelegationSASToken(URI(uri); kw...)
+generateUserDelegationSASURI(uri::URI; kw...) = URI(uri; query=generateUserDelegationSASToken(uri; kw...))
+generateUserDelegationSASURI(uri::String; kw...) = generateUserDelegationSASURI(URI(uri); kw...)

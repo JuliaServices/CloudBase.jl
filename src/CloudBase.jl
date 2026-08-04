@@ -4,7 +4,6 @@ export CloudTest
 
 using Dates, Base64, Random, Sockets
 using HTTP, URIs, SHA, MD5, LoggingExtras, Figgy, JSON, OpenSSL
-import FunctionWrappers: FunctionWrapper
 
 """
     CloudCredentials
@@ -46,65 +45,242 @@ end
 # expiration check for credential types that support refreshing
 expired(x) = x.expiration !== nothing && Dates.now(Dates.UTC) > (x.expiration - x.expireThreshold)
 
+
+# HTTP 2 request bodies are typed objects rather than raw bytes, and `HTTP.isbytes`
+# no longer exists. Signing needs the payload bytes for its SHA-256/HMAC.
+requestbodybytes(request::HTTP.Request) = bodybytes(request.body)
+bodybytes(body::HTTP.BytesBody) = copy(body)
+bodybytes(::HTTP.EmptyBody) = UInt8[]
+bodybytes(body::AbstractVector{UInt8}) = body
+bodybytes(body::AbstractString) = Vector{UInt8}(codeunits(String(body)))
+function bodybytes(body)
+    throw(ArgumentError(
+        "cloud request signing requires a buffered request body; got $(typeof(body))",
+    ))
+end
+
 include("aws.jl")
 include("azure.jl")
 include("gcp.jl")
 
 
+"""
+    CloudBase.PREREQUEST_CALLBACK[] = callback
+
+Set a callback that runs once before each cloud request. The callback receives the
+request method as a `String`.
+"""
 prerequest(method::String) = nothing
+
+"""
+    CloudBase.METRICS_CALLBACK[] = callback
+
+Set a callback that runs once after each buffered request and each `open do`
+request. The callback keeps the 13-argument contract from CloudBase 1.x. HTTP 2
+does not expose the old error-category counters or connect/read/write durations,
+so those seven values are reported as zero. A raw `open` stream cannot report
+completion until the caller closes it, so use the `open do` form when metrics are
+required.
+"""
 metrics(method::String, request_failed::Bool, request_retries::Int, request_duration_ms::Float64, bytes_sent::Int, bytes_received::Int, connect_errors::Int, io_errors::Int, status_errors::Int, timeout_errors::Int, connect_duration_ms::Float64, read_duration_ms::Float64, write_duration_ms::Float64) = nothing
 
-const PREREQUEST_CALLBACK = Ref{FunctionWrapper{Nothing, Tuple{String}}}()
-const METRICS_CALLBACK = Ref{FunctionWrapper{Nothing, Tuple{String, Bool, Int64, Float64, Int64, Int64, Int64, Int64, Int64, Int64, Float64, Float64, Float64}}}()
+const PREREQUEST_CALLBACK = Ref{Function}(prerequest)
+const METRICS_CALLBACK = Ref{Function}(metrics)
 
-function cloudmetricslayer(handler)
-    function cloudmetrics(req; logexceptionalduration::Int=0, kw...)
-        failed = false
-        bytes_sent = bytes_received = connect_errors = io_errors = status_errors = timeout_errors = 0
-        connect_duration_ms = read_duration_ms = write_duration_ms = 0.0
-        start = time()
-        PREREQUEST_CALLBACK[](req.method)
+mutable struct CloudRequestStats
+    start::Float64
+    retries::Int
+    bytes_sent::Int
+    bytes_received::Int
+end
+
+CloudRequestStats() = CloudRequestStats(time(), 0, 0, 0)
+
+_content_length(x) = x isa Integer ? max(0, Int(x)) : 0
+
+function reportmetrics(method, url, failed, stats, logexceptionalduration)
+    duration_ms = (time() - stats.start) * 1000
+    if logexceptionalduration > 0 &&
+            div(duration_ms, 1000) > logexceptionalduration
+        @warn "Exceptionally long cloud request:" total_duration_ms=duration_ms method=method url
+    end
+    METRICS_CALLBACK[](
+        String(method), failed, stats.retries, duration_ms,
+        stats.bytes_sent, stats.bytes_received, 0, 0, 0, 0,
+        0.0, 0.0, 0.0,
+    )
+    return nothing
+end
+
+function cloudopen_do(
+        f, openfn, method, url, headers;
+        status_exception::Bool=true, kw...)
+    stats = CloudRequestStats()
+    failed = false
+    stream = nothing
+    try
+        stream = openfn(method, url, headers; kw...)
+        callback_error = nothing
         try
-            resp = handler(req; kw...)
-            bytes_received = get(req.context, :nbytes, 0)
-            bytes_sent = get(req.context, :nbytes_written, 0)
-            read_duration_ms = get(req.context, :read_duration_ms, 0.0)
-            write_duration_ms = get(req.context, :write_duration_ms, 0.0)
-            return resp
-        catch
-            failed = true
-            rethrow()
+            f(stream)
+        catch err
+            callback_error = err
         finally
-            retries = get(req.context, :retryattempt, 0)
-            connect_errors = get(req.context, :connect_errors, 0)
-            io_errors = get(req.context, :io_errors, 0)
-            status_errors = get(req.context, :status_errors, 0)
-            timeout_errors = get(req.context, :timeout_errors, 0)
-            connect_duration_ms = get(req.context, :connect_duration_ms, 0.0)
-            dur = (time() - start) * 1000
-            if logexceptionalduration > 0 && div(dur, 1000) > logexceptionalduration
-                @warn "Exceptionally long cloud request:" total_duration_ms=dur method=req.method context=req.context
+            try
+                Base.closewrite(stream)
+            catch
             end
-            METRICS_CALLBACK[](req.method, failed, retries, dur, bytes_sent, bytes_received,
-                connect_errors, io_errors, status_errors, timeout_errors,
-                connect_duration_ms, read_duration_ms, write_duration_ms)
+        end
+        response = HTTP.closeread(stream)
+        stats.bytes_sent = _content_length(stream.request_body_content_length)
+        stats.bytes_received = _content_length(response.content_length)
+        status_exception && HTTP._status_throws(response) &&
+            throw(HTTP.StatusError(response))
+        callback_error === nothing || throw(callback_error)
+        return response
+    catch
+        failed = true
+        rethrow()
+    finally
+        reportmetrics(method, url, failed, stats, get(kw, :logexceptionalduration, 0))
+    end
+end
+
+"""
+    cloudlayer(provider::Symbol)
+
+Client middleware that installs an HTTP 2 `trace` callback which signs every request
+attempt and records metrics.
+
+Signing happens on `RequestEvent`, which HTTP emits immediately before *each* attempt,
+so a retried request is re-signed with a fresh timestamp - the same guarantee the HTTP 1
+stream layer provided. `HTTP.Request` no longer carries a `.url`, so the absolute URL is
+taken from the event.
+"""
+# Kwargs consumed by the signers rather than by HTTP. In HTTP 1 the layers absorbed
+# these; HTTP 2 validates its keyword arguments, so they must be split out explicitly.
+const SIGNING_KWARGS = (:service, :region, :x_amz_date, :includeContentSha256, :debug,
+                        :version, :timestamp, :addMd5)
+
+function cloudhttpkwargs(provider, uri, credentials, httpkw)
+    if !haskey(httpkw, :read_idle_timeout) && !haskey(httpkw, :readtimeout)
+        httpkw = merge((read_idle_timeout=300,), httpkw)
+    end
+    if provider === :azure && uri.host == "127.0.0.1" &&
+            !haskey(httpkw, :require_ssl_verification)
+        httpkw = merge((require_ssl_verification=false,), httpkw)
+    end
+    return httpkw
+end
+
+function cloudlayer(provider::Symbol)
+    return function(handler)
+        return function(method, url, headers=Pair{String,String}[], body=nothing;
+                        credentials=nothing, awsv2::Bool=false, trace=nothing,
+                        logexceptionalduration::Int=0, kw...)
+            signkw = NamedTuple(k => v for (k, v) in pairs(kw) if k in SIGNING_KWARGS)
+            httpkw = NamedTuple(k => v for (k, v) in pairs(kw) if !(k in SIGNING_KWARGS))
+            uri = URI(url)
+            httpkw = cloudhttpkwargs(provider, uri, credentials, httpkw)
+            stats = CloudRequestStats()
+            PREREQUEST_CALLBACK[](String(method))
+            tracer = function(ev)
+                if ev isa HTTP.RequestEvent
+                    request_uri = URI(ev.url)
+                    if provider === :aws && awsv2
+                        signed_body = awssignv2!(ev.request, request_uri; credentials, signkw...)
+                        if signed_body !== nothing
+                            ev.request.body isa HTTP.BytesBody ||
+                                throw(ArgumentError("AWS SigV2 POST signing requires a buffered request body"))
+                            data = ev.request.body.data
+                            empty!(data)
+                            append!(data, codeunits(signed_body))
+                            ev.request.content_length = length(data)
+                        end
+                    elseif provider === :aws
+                        awssign!(ev.request, request_uri; credentials, signkw...)
+                    elseif provider === :azure
+                        azuresign!(ev.request, request_uri; credentials, signkw...)
+                    elseif provider === :gcp
+                        gcpsign!(ev.request, request_uri; credentials, signkw...)
+                    end
+                    stats.bytes_sent = _content_length(ev.request.content_length)
+                elseif ev isa HTTP.RetryEvent
+                    stats.retries += 1
+                elseif ev isa HTTP.ResponseHeadEvent
+                    stats.bytes_received = _content_length(ev.response.content_length)
+                elseif ev isa HTTP.DoneEvent
+                    reportmetrics(
+                        method,
+                        ev.url,
+                        ev.err !== nothing,
+                        stats,
+                        logexceptionalduration,
+                    )
+                end
+                # compose with any caller-supplied trace rather than displacing it
+                trace === nothing || trace(ev)
+                return nothing
+            end
+            return handler(method, url, headers, body; trace=tracer, httpkw...)
         end
     end
 end
 
-# custom stream layer to be included right before actual request
-# is sent to ensure header timestamps are as correct as possible
-function cloudsignlayer(handler)
-    function cloudsign(stream; aws::Bool=false, awsv2::Bool=false, azure::Bool=false, gcp::Bool=false, kw...)
-        req = stream.message.request
-        if awsv2
-            awssignv2!(req; kw...)
-        elseif aws
-            awssign!(req; kw...)
+function cloudopenlayer(provider::Symbol)
+    return function(handler)
+        return function(method, url, headers=Pair{String,String}[];
+                        credentials=nothing, awsv2::Bool=false,
+                        logexceptionalduration::Int=0, kw...)
+            signkw = NamedTuple(k => v for (k, v) in pairs(kw) if k in SIGNING_KWARGS)
+            httpkw = NamedTuple(k => v for (k, v) in pairs(kw) if !(k in SIGNING_KWARGS))
+            uri = URI(url)
+            httpkw = cloudhttpkwargs(provider, uri, credentials, httpkw)
+            if credentials !== nothing
+                if haskey(httpkw, :redirect)
+                    httpkw.redirect === true && throw(ArgumentError(
+                        "authenticated cloud open does not support redirects; " *
+                        "make a new signed request to the redirect target",
+                    ))
+                else
+                    # HTTP.open cannot install a per-attempt trace signer. A redirect
+                    # changes the canonical URL and would reuse a stale signature.
+                    httpkw = merge((redirect=false,), httpkw)
+                end
+            end
+            PREREQUEST_CALLBACK[](String(method))
+            credentials === nothing &&
+                return handler(method, url, headers; httpkw...)
+            haskey(httpkw, :query) &&
+                throw(ArgumentError("authenticated cloud open requires query parameters in the URL"))
+            method_string = uppercase(String(method))
+            method_string in ("GET", "HEAD") ||
+                throw(ArgumentError("authenticated cloud open supports only bodyless GET and HEAD requests"))
+            host = isempty(uri.port) ? String(uri.host) : "$(uri.host):$(uri.port)"
+            path = isempty(uri.path) ? "/" : String(uri.path)
+            target = isempty(uri.query) ? path : "$path?$(uri.query)"
+            request = HTTP.Request(
+                method_string,
+                target;
+                headers,
+                body=UInt8[],
+                host,
+            )
+            if provider === :aws && awsv2
+                method_string == "GET" ||
+                    throw(ArgumentError("AWS SigV2 cloud open supports only GET requests"))
+                awssignv2!(request, uri; credentials, signkw...)
+            elseif provider === :aws
+                awssign!(request, uri; credentials, signkw...)
+            elseif provider === :azure
+                azuresign!(request, uri; credentials, signkw...)
+            elseif provider === :gcp
+                gcpsign!(request, uri; credentials, signkw...)
+            end
+            target_uri = URI(request.target)
+            signed_url = URI(uri; path=target_uri.path, query=target_uri.query, fragment="")
+            return handler(method, signed_url, collect(request.headers); httpkw...)
         end
-        azure && azuresign!(req; kw...)
-        gcp && gcpsign!(req; kw...)
-        return handler(stream; kw...)
     end
 end
 
@@ -119,11 +295,16 @@ just like the `HTTP` equivalents and supports all the same keyword arguments.
 module AWS
 
 using HTTP
-import ..cloudsignlayer, ..cloudmetricslayer, ..AWSCredentials, ..AbstractStore, ..AWS_DEFAULT_REGION
+import ..cloudlayer, ..cloudopenlayer, ..cloudopen_do, ..AWSCredentials, ..AbstractStore, ..AWS_DEFAULT_REGION
 
-awslayer(handler) = (req; kw...) -> handler(req; kw..., aws=true, readtimeout=300)
+HTTP.@client (cloudlayer(:aws),) (cloudopenlayer(:aws),)
 
-HTTP.@client (first=(awslayer, cloudmetricslayer), last=()) (first=(), last=(cloudsignlayer,))
+function open(
+        f::Function, method::Union{AbstractString, Symbol},
+        url::Union{AbstractString, HTTP.URI}, headers=Pair{String, String}[];
+        status_exception::Bool=true, kw...)
+    return cloudopen_do(f, open, method, url, headers; status_exception, kw...)
+end
 
 const DOCS = """
     AWS.get(url, headers, body; credentials, awsv2=false, kw...)
@@ -196,11 +377,16 @@ just like the `HTTP` equivalents and supports all the same keyword arguments.
 module Azure
 
 using HTTP
-import ..cloudsignlayer, ..cloudmetricslayer, ..AzureCredentials, ..AbstractStore
+import ..cloudlayer, ..cloudopenlayer, ..cloudopen_do, ..AzureCredentials, ..AbstractStore
 
-azurelayer(handler) = (req; kw...) -> handler(req; azure=true, aws=false, awsv2=false, readtimeout=300, require_ssl_verification=req.url.host != "127.0.0.1", kw...)
+HTTP.@client (cloudlayer(:azure),) (cloudopenlayer(:azure),)
 
-HTTP.@client (first=(azurelayer, cloudmetricslayer), last=()) (first=(), last=(cloudsignlayer,))
+function open(
+        f::Function, method::Union{AbstractString, Symbol},
+        url::Union{AbstractString, HTTP.URI}, headers=Pair{String, String}[];
+        status_exception::Bool=true, kw...)
+    return cloudopen_do(f, open, method, url, headers; status_exception, kw...)
+end
 
 const DOCS = """
     Azure.get(url, headers, body; credentials, kw...)
@@ -268,11 +454,16 @@ the `HTTP` equivalents and support all the same keyword arguments.
 module GCP
 
 using HTTP
-import ..cloudsignlayer, ..cloudmetricslayer, ..GCPCredentials, ..AbstractStore
+import ..cloudlayer, ..cloudopenlayer, ..cloudopen_do, ..GCPCredentials, ..AbstractStore
 
-gcplayer(handler) = (req; kw...) -> handler(req; gcp=true, aws=false, awsv2=false, azure=false, readtimeout=300, kw...)
+HTTP.@client (cloudlayer(:gcp),) (cloudopenlayer(:gcp),)
 
-HTTP.@client (first=(gcplayer, cloudmetricslayer), last=()) (first=(), last=(cloudsignlayer,))
+function open(
+        f::Function, method::Union{AbstractString, Symbol},
+        url::Union{AbstractString, HTTP.URI}, headers=Pair{String, String}[];
+        status_exception::Bool=true, kw...)
+    return cloudopen_do(f, open, method, url, headers; status_exception, kw...)
+end
 
 const DOCS = """
     GCP.get(url, headers, body; credentials, kw...)
@@ -333,11 +524,5 @@ end
 end # module GCP
 
 include("CloudTest.jl")
-
-function __init__()
-    PREREQUEST_CALLBACK[] = prerequest
-    METRICS_CALLBACK[] = metrics
-    return
-end
 
 end # module CloudBase

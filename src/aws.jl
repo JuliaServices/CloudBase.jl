@@ -186,10 +186,16 @@ function Figgy.load(x::EC2CredentialsSource)
 end
 reloadEC2Credentials!(ecsHost="169.254.169.254", port=80) = Figgy.load!(AWS_CONFIGS, EC2CredentialsSource(ecsHost, port))
 
+# STS request parameters are Any-valued: DurationSeconds is an Int and WebIdentityToken
+# is read from a file, neither of which fits a Dict{String,String}
+sts_params(roleArn) = Dict{String,Any}("RoleArn" => roleArn)
+
 function loadRoleArn(roleArn, credFile, configFile)
     # with role_arn, we're going to call STS for temporary creds
     # so we need to figure out where our source creds come from
-    params = Dict("RoleArn" => roleArn)
+    # Dict{String,Any}: STS parameters below include non-String values (DurationSeconds is
+    # an Int, WebIdentityToken is read from a file), which a Dict{String,String} cannot hold
+    params = sts_params(roleArn)
     if haskey(AWS_CONFIGS, "role_session_name")
         params["RoleSessionName"] = AWS_CONFIGS["role_session_name"]
     else
@@ -216,7 +222,8 @@ function loadRoleArn(roleArn, credFile, configFile)
         )
     elseif haskey(AWS_CONFIGS, "web_identity_token_file")
         # load the web identity token to be passed to STS
-        params["WebIdentityToken"] = read(AWS_CONFIGS["web_identity_token_file"])
+        # the token is sent as a request parameter, so it must be text, not raw bytes
+        params["WebIdentityToken"] = strip(read(AWS_CONFIGS["web_identity_token_file"], String))
         params["Action"] = "AssumeRoleWithWebIdentity"
         nothing
     end
@@ -244,34 +251,68 @@ const AWS_DEFAULT_REGION = "us-east-1"
 
 # try to get service/region from host directly (otherwise, require user to pass service)
 # or use env variables for region
-# "amazonaws.com"
-# "s3.amazonaws.com"
-# "s3.us-west-2.amazonaws.com"
-# "bucket.s3.us-west-2.amazonaws.com"
-# "bucket.vpce-1a2b3c4d-5e6f.s3.us-east-1.vpce.amazonaws.com"
+# "amazonaws.com"                                          -> (nothing, nothing)
+# "s3.amazonaws.com"                                       -> ("s3", nothing)
+# "s3.us-west-2.amazonaws.com"                             -> ("s3", "us-west-2")
+# "bucket.s3.us-west-2.amazonaws.com"                      -> ("s3", "us-west-2")
+# "bucket.s3.amazonaws.com"                                -> ("s3", nothing)
+# "my.dotted.bucket.s3.us-west-2.amazonaws.com"            -> ("s3", "us-west-2")
+# "bucket.vpce-1a2b3c4d-5e6f.s3.us-east-1.vpce.amazonaws.com" -> ("s3", "us-east-1")
+#
+# Matching is anchored at the *end* of the host rather than counting labels from the
+# front: a bucket name may itself contain dots, so a fixed label count mistakes part of
+# the bucket for the service (e.g. "my.bucket.s3.amazonaws.com" previously returned
+# service="bucket", region="s3", producing a signature for the wrong credential scope).
 function urlServiceRegion(host)
-    spl = split(host, '.')
-    if length(spl) == 5 && !all(isdigit, spl[2]) && !all(isdigit, spl[3])
-        return (spl[2], spl[3])
-    elseif length(spl) == 4 && !all(isdigit, spl[1]) && !all(isdigit, spl[2])
-        # got service & region
-        return (spl[1], spl[2])
-    elseif length(spl) == 3 && !all(isdigit, spl[1])
-        # just got service
-        return (spl[1], nothing)
-    elseif length(spl) == 7 && spl[5] == "vpce" && spl[6] == "amazonaws" && spl[7] == "com"
-        # See virtual private cloud https://docs.aws.amazon.com/AmazonS3/latest/userguide/privatelink-interface-endpoints.html
-        # got service & region
-        return (spl[3], spl[4])
+    spl = split(lowercase(String(host)), '.')
+    suffix_length = if length(spl) >= 3 && spl[end - 1:end] == ["amazonaws", "com"]
+        2
+    elseif length(spl) >= 4 && spl[end - 2:end] == ["amazonaws", "com", "cn"]
+        3
     else
-        # no service, no region
         return (nothing, nothing)
     end
+    rest = @view spl[1:(end - suffix_length)]
+    isempty(rest) && return (nothing, nothing)
+    if length(rest) >= 4 && rest[end] == "vpce"
+        # bucket.vpce-<id>.<service>.<region>.vpce.amazonaws.com
+        return (endpointSigningService(rest[end - 2]), rest[end - 1])
+    end
+    if length(rest) == 1
+        # <service>.amazonaws.com
+        return (endpointSigningService(rest[1]), nothing)
+    end
+    last_label = rest[end]
+    # a region label looks like "us-west-2"/"eu-central-1"; a service label does not
+    if isregionlabel(last_label)
+        service_index = lastindex(rest) - 1
+        while service_index > 1 && rest[service_index] in ("dualstack", "fips")
+            service_index -= 1
+        end
+        return (endpointSigningService(rest[service_index]), last_label)
+    end
+    # no region present, so the final label is the service (anything before it is the bucket)
+    return (endpointSigningService(last_label), nothing)
 end
 
-bytes(x::String) = unsafe_wrap(Array, pointer(x), sizeof(x))
+endpointSigningService(service) = replace(String(service), r"-fips$" => "")
+
+# AWS region identifiers are <area>-<direction>-<number>, e.g. us-west-2, ap-southeast-1,
+# us-gov-east-1, cn-north-1. Service labels ("s3", "sts", "dynamodb") never match this.
+function isregionlabel(label)
+    parts = split(label, '-')
+    length(parts) >= 3 || return false
+    all(isdigit, parts[end]) || return false
+    return all(p -> !isempty(p) && all(c -> 'a' <= c <= 'z', p), @view parts[1:end-1])
+end
+
+# Previously `unsafe_wrap(Array, pointer(x), sizeof(x))`, which aliases the String's buffer
+# without keeping it alive: callers pass temporaries (e.g. bytes("AWS4$secret")) that the
+# collector is free to reclaim before the resulting array is consumed. Copy instead; signing
+# is not hot enough for the alias to be worth the hazard.
+bytes(x::String) = Vector{UInt8}(codeunits(x))
 trimall(x) = strip(replace(x, r"[ ]{2,}" => " "))
-canonicalHeader(x::HTTP.Header) = strip(lowercase(x.first)) => trimall(x.second)
+canonicalHeader(x::Pair) = strip(lowercase(x.first)) => trimall(x.second)
 const ISO8601 = dateformat"yyyymmdd\THHMMSS\Z"
 const ISO8601DATE = dateformat"yyyymmdd"
 const SIG2DF = dateformat"yyyy-mm-dd\THH:MM:SS\Z"
@@ -289,7 +330,31 @@ safe(c::Char) = c == '-' || c == '_' || c == '.' || c == '~' || ('A' <= c <= 'Z'
 uriencode(c::Char) = join((string('%', uppercase(string(Int(b), base=16, pad=2))) for b in CodeUnits(c)))
 uriencode(x, path=false) = join((safe(c) || (path && c == '/')) ? c : uriencode(c) for c in x)
 
+function canonicalQuery(url)
+    encoded = [(uriencode(k), uriencode(v)) for (k, v) in queryparampairs(url)]
+    sort!(encoded; by=identity)
+    return join((string(k, "=", v) for (k, v) in encoded), "&")
+end
+
+function canonicalRequestHeaders(request, url)
+    headers = map(canonicalHeader, request.headers)
+    if !any(x -> x.first == "host", headers)
+        host = if request.host !== nothing
+            request.host
+        elseif isempty(url.port)
+            url.host
+        else
+            "$(url.host):$(url.port)"
+        end
+        push!(headers, "host" => String(host))
+    end
+    sort!(headers; by=x -> x.first)
+    deduplicateHeaders!(headers)
+    return headers
+end
+
 function deduplicateHeaders!(headers)
+    isempty(headers) && return
     j = 1
     k, v = first(headers)
     for i = 2:length(headers)
@@ -307,20 +372,20 @@ function deduplicateHeaders!(headers)
     return
 end
 
-function awssign!(request::HTTP.Request; service=nothing, region=nothing, credentials::Union{Nothing, AWSCredentials}=nothing, x_amz_date=nothing, includeContentSha256=true, debug=false, kw...)
+function awssign!(request::HTTP.Request, url::URI; service=nothing, region=nothing, credentials::Union{Nothing, AWSCredentials}=nothing, x_amz_date=nothing, includeContentSha256=true, debug=false, kw...)
     if debug
         return LoggingExtras.withlevel(Logging.Debug; verbosity=1) do
-            awssign!(request; service, region, access_key_id, secret_access_key, session_token, x_amz_date, includeContentSha256, kw...)
+            awssign!(request, url; service, region, credentials, x_amz_date, includeContentSha256, kw...)
         end
     end
+    # An absent credential object denotes an intentionally public request.
+    credentials === nothing && return
     # determine the service & region for the request (needed for signing)
-    serv, reg = urlServiceRegion(request.url.host)
+    serv, reg = urlServiceRegion(url.host)
     service = _some(service, serv)
-    service === nothing && ArgumentError("unable to determine AWS service for request; pass `service=X`")
+    service === nothing && throw(ArgumentError("unable to determine AWS service for request from host `$(url.host)`; pass `service=X`"))
     region = something(reg, region, get(AWS_CONFIGS, "region", AWS_DEFAULT_REGION))
     @debugv 1 "computed service = `$service`, region = `$region` for aws request"
-    # if the credentials is empty, let's assume this is for a public request, so no signing required
-    credentials === nothing && return
     # determine credentials
     creds = getCredentials(credentials)
     # we're going to set Authorization header, so delete it if present
@@ -335,7 +400,7 @@ function awssign!(request::HTTP.Request; service=nothing, region=nothing, creden
     # https://docs.aws.amazon.com/general/latest/gr/sigv4_signing.html
     # Task 1: Create a canonical request for Signature Version 4
     service = lowercase(service)
-    request_path = isempty(request.url.path) ? "/" : request.url.path
+    request_path = isempty(url.path) ? "/" : url.path
     canonicalURI = if service == "s3"
         # Request URLs contain an escaped path. Decode it before applying SigV4
         # encoding so `%20` is signed as `%20`, not `%2520`. Do not normalize
@@ -345,15 +410,14 @@ function awssign!(request::HTTP.Request; service=nothing, region=nothing, creden
         URIs.normpath(service == "service" ? uriencode(request_path, true) : escapepath(request_path))
     end
     # @show canonicalURI
-    canonicalQueryString = join((string(uriencode(k), "=", uriencode(v)) for (k, v) in sort!(queryparampairs(request.url); by=x->"$(x[1])$(x[2])")), "&")
-    # @show request.url, queryparampairs(request.url), canonicalQueryString
-    headers = sort!(map(canonicalHeader, request.headers); by=x->x.first)
-    deduplicateHeaders!(headers)
+    # SigV4 sorts the encoded parameter names and values, not their raw forms.
+    canonicalQueryString = canonicalQuery(url)
+    # @show url, queryparampairs(url), canonicalQueryString
+    headers = canonicalRequestHeaders(request, url)
     # @show headers
     canonicalHeaders = join(map(x -> "$(x.first):$(x.second)", headers), "\n")
     signedHeaders = join(map(first, headers), ";")
-    @assert HTTP.isbytes(request.body) || request.body isa Union{Dict, NamedTuple}
-    body = HTTP.isbytes(request.body) ? request.body : HTTP.escapeuri(request.body)
+    body = requestbodybytes(request)
     #TODO: handle streaming request bodies?
     payloadHash = bytes2hex(sha256(body))
     if includeContentSha256
@@ -387,14 +451,13 @@ function awssign!(request::HTTP.Request; service=nothing, region=nothing, creden
     return
 end
 
-function awssignv2!(request::HTTP.Request; credentials::Union{Nothing, AWSCredentials}=nothing, version=nothing, timestamp=nothing, kw...)
+function awssignv2!(request::HTTP.Request, url::URI; credentials::Union{Nothing, AWSCredentials}=nothing, version=nothing, timestamp=nothing, kw...)
     credentials === nothing && return
     if request.method == "GET"
-        params = queryparams(request.url)
+        params = queryparams(url)
     else
         request.method == "POST" || throw(ArgumentError("unsupported method for AWS SigV2 request signing `$(request.method)`"))
-        request.body isa Dict || request.body isa NamedTuple || throw(ArgumentError("AWS SigV2 POST request signing requires a Dict or NamedTuple request body"))
-        params = Dict(string(k) => v for (k, v) in pairs(request.body))
+        params = queryparams(HTTP.URI("?" * String(copy(requestbodybytes(request)))))
     end
     # determine credentials
     creds = getCredentials(credentials)
@@ -411,16 +474,18 @@ function awssignv2!(request::HTTP.Request; credentials::Union{Nothing, AWSCreden
     end
     sorted = sort!(collect(params); by=x->x.first)
     stringToSign = """$(request.method)
-    $(lowercase(request.url.host))
-    $(isempty(request.url.path) ? "/" : request.url.path)
+    $(lowercase(url.host))
+    $(isempty(url.path) ? "/" : url.path)
     $(HTTP.escapeuri(sorted))"""
     signature = strip(base64encode(hmac_sha256(bytes(creds.secret_access_key), stringToSign)))
     if request.method == "GET"
         push!(sorted, "Signature" => signature)
-        request.target = request.url.path * "?" * HTTP.escapeuri(sorted)
+        request.target = (isempty(url.path) ? "/" : url.path) * "?" * HTTP.escapeuri(sorted)
     else
         params["Signature"] = signature
-        request.body = params
+        # HTTP 2 parameterises Request on its body type, so the body cannot be replaced
+        # in place. Return the signed form-encoded body for the caller to send.
+        return HTTP.escapeuri(params)
     end
-    return
+    return nothing
 end
