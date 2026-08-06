@@ -142,12 +142,13 @@ function Figgy.load(x::ECSCredentialsSource)
     url = get(AWS_CONFIGS, "container_credentials_relative_uri", "")
     isempty(url) && return ()
     try
+        # RoleArn identifies the role for these already-vended credentials. It is not
+        # a request to assume the role again through STS.
         return Figgy.kmap(Figgy.JsonObject(HTTP.get("$host$url").body),
             "AccessKeyId" => "aws_access_key_id",
             "SecretAccessKey" => "aws_secret_access_key",
             "Token" => "aws_session_token",
             "Expiration" => "expiration",
-            "RoleArn" => "role_arn",
         )
     catch
         return ()
@@ -173,12 +174,13 @@ function Figgy.load(x::EC2CredentialsSource)
         role = String(HTTP.get("http://$host:$port/latest/meta-data/iam/security-credentials/").body)
         region = String(HTTP.get("http://$host:$port/latest/meta-data/placement/region").body)
         Figgy.load!(AWS_CONFIGS, "region" => region)
+        # The metadata service has already assumed the instance role and returned its
+        # temporary credentials. Do not treat response metadata as role configuration.
         return Figgy.kmap(Figgy.JsonObject(HTTP.get("http://$host:$port/latest/meta-data/iam/security-credentials/$role").body),
             "AccessKeyId" => "aws_access_key_id",
             "SecretAccessKey" => "aws_secret_access_key",
             "Token" => "aws_session_token",
             "Expiration" => "expiration",
-            "RoleArn" => "role_arn",
         )
     catch
         return ()

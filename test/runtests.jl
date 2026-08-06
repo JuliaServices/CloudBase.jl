@@ -262,16 +262,20 @@ end
 
 @testset "AWS ECS Task" begin
     ECS.with() do
+        delete!(CloudBase.AWS_CONFIGS, "role_arn")
         CloudBase.reloadECSCredentials!("http://127.0.0.1")
         @test get(CloudBase.AWS_CONFIGS, "aws_session_token", "") == "ECS_TOKEN"
+        @test !haskey(CloudBase.AWS_CONFIGS, "role_arn")
     end
 end
 
 @testset "AWS EC2" begin
     EC2.with() do
+        delete!(CloudBase.AWS_CONFIGS, "role_arn")
         CloudBase.reloadEC2Credentials!("127.0.0.1", 50397)
         @test get(CloudBase.AWS_CONFIGS, "aws_session_token", "") == "EC2_TOKEN"
         @test get(CloudBase.AWS_CONFIGS, "region", "") == "us-west-1"
+        @test !haskey(CloudBase.AWS_CONFIGS, "role_arn")
     end
 end
 
