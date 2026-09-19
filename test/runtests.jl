@@ -143,6 +143,45 @@ end
     end
 end
 
+@testset "SigV2 body ownership and retries" begin
+    credentials = CloudBase.AWSCredentials("example-key", "example-secret")
+    requests = String[]
+    server = HTTP.serve!("127.0.0.1", 0) do req
+        push!(requests, String(req.body))
+        HTTP.Response(isodd(length(requests)) ? 503 : 200, "ok")
+    end
+    try
+        for input in (
+            "Action=Example",
+            Vector{UInt8}(codeunits("Action=Example")),
+            codeunits("Action=Example"),
+            Dict("Action" => "Example"),
+            HTTP.BytesBody(Vector{UInt8}(codeunits("Action=Example"))),
+            HTTP.BytesBody(codeunits("Action=Example")),
+        )
+            before = deepcopy(input)
+            empty!(requests)
+            resp = AWS.post(
+                "http://127.0.0.1:$(HTTP.port(server))/", [], input;
+                credentials, awsv2=true, timestamp=DateTime(2026), version="1",
+                retry_non_idempotent=true, retries=1,
+            )
+            @test resp.status == 200
+            @test length(requests) == 2
+            @test requests[1] == requests[2]
+            @test haskey(URIs.queryparams(requests[1]), "Signature")
+            if input isa HTTP.BytesBody
+                @test input.data == before.data
+                @test input.next_index == before.next_index
+            else
+                @test input == before
+            end
+        end
+    finally
+        close(server)
+    end
+end
+
 @time @testset "AWS" begin
     config = Ref{Any}()
     Minio.with(bindIP="127.0.0.1", startupDelay=0.5, waitForPortTimeout=10) do conf

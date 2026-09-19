@@ -192,10 +192,11 @@ function cloudlayer(provider::Symbol)
                         if signed_body !== nothing
                             ev.request.body isa HTTP.BytesBody ||
                                 throw(ArgumentError("AWS SigV2 POST signing requires a buffered request body"))
-                            data = ev.request.body.data
-                            empty!(data)
-                            append!(data, codeunits(signed_body))
-                            ev.request.content_length = length(data)
+                            # HTTP clones the body wrapper for each attempt but shares
+                            # its bytes. Replace the bytes to preserve the unsigned input.
+                            ev.request.body.data = codeunits(signed_body)
+                            ev.request.body.next_index = 1
+                            ev.request.content_length = ncodeunits(signed_body)
                         end
                     elseif provider === :aws
                         awssign!(ev.request, request_uri; credentials, signkw...)
