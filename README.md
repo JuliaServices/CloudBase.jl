@@ -46,7 +46,7 @@ Contributions are very welcome, as are feature requests and suggestions. Please 
 [issue][issues-url] if you encounter any problems or would just like to ask a question.
 
 [docs-latest-img]: https://img.shields.io/badge/docs-latest-blue.svg
-[docs-latest-url]: https://juliaservices.github.io/CloudBase.jl/latest
+[docs-latest-url]: https://juliaservices.github.io/CloudBase.jl/dev/
 
 [docs-stable-img]: https://img.shields.io/badge/docs-stable-blue.svg
 [docs-stable-url]: https://juliaservices.github.io/CloudBase.jl/stable
