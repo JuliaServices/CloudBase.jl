@@ -53,8 +53,6 @@ requestbodybytes(request::HTTP.Request) = bodybytes(request.body)
 # storage shared by replay attempts. SigV2 copies explicitly before String().
 bodybytes(body::HTTP.BytesBody) = body.next_index == 1 ? body.data : view(body.data, body.next_index:length(body.data))
 bodybytes(::HTTP.EmptyBody) = UInt8[]
-bodybytes(body::AbstractVector{UInt8}) = body
-bodybytes(body::AbstractString) = codeunits(body)
 function bodybytes(body)
     throw(ArgumentError(
         "cloud request signing requires a buffered request body; got $(typeof(body))",
