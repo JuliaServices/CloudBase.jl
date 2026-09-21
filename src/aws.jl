@@ -421,7 +421,7 @@ function awssign!(request::HTTP.Request, url::URI; service=nothing, region=nothi
     signedHeaders = join(map(first, headers), ";")
     body = requestbodybytes(request)
     #TODO: handle streaming request bodies?
-    payloadHash = bytes2hex(sha256(body))
+    payloadHash = bytes2hex(payloadsha256(body))
     if includeContentSha256
         HTTP.setheader(request, "x-amz-content-sha256" => payloadHash)
     end

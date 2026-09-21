@@ -37,3 +37,17 @@ end
         close(client)
     end
 end
+
+@testset "String-backed payload hashing" begin
+    # Include byte ranges that split a UTF-8 character: signing treats bytes,
+    # not text. Hashing must preserve the owner and work through forced GC.
+    text = repeat("aα", 10000)
+    for input in (codeunits(text), codeunits(SubString(text, 2)),
+            view(codeunits(text), 3:ncodeunits(text)-1), view(codeunits(text), 1:0))
+        expected = CloudBase.sha256(Vector{UInt8}(input))
+        @test CloudBase.payloadsha256(input) == expected
+        GC.gc()
+        @test CloudBase.payloadsha256(input) == expected
+        @test minimum(@allocated(CloudBase.payloadsha256(input)) for _ in 1:5) < 4096
+    end
+end

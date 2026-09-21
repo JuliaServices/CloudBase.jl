@@ -61,6 +61,19 @@ function bodybytes(body)
     ))
 end
 
+payloadsha256(body) = sha256(body)
+
+# SHA's block copies perform alias checks. For immutable String-backed bytes,
+# those checks can hash the whole string for every 64-byte block. Borrow a
+# non-owning array only for the duration of hashing, with the owner GC-rooted.
+const StringBytes = Base.CodeUnits{UInt8,<:Union{String,SubString{String}}}
+function payloadsha256(body::Union{StringBytes,SubArray{UInt8,1,<:StringBytes,Tuple{UnitRange{Int}},true}})
+    GC.@preserve body begin
+        bytes = unsafe_wrap(Vector{UInt8}, pointer(body), length(body); own=false)
+        return sha256(bytes)
+    end
+end
+
 include("aws.jl")
 include("azure.jl")
 include("gcp.jl")
