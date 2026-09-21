@@ -1009,3 +1009,5 @@ end
     @test hasmethod(CloudBase.reloadAzureVMCredentials!, Tuple{})
     @test hasmethod(CloudBase.reloadAzureVMCredentials!, Tuple{String})
 end
+
+include("signing_storage.jl")
