@@ -89,3 +89,20 @@ export CLOUDBASE_GCP_LIVE_HMAC_SECRET=<secret>
 ```
 
 `CLOUDBASE_GCP_LIVE_QUOTA_PROJECT` can also be provided when the request path needs a user-project header.
+
+
+## Buffered request ownership
+
+For buffered uploads, signing reads the remaining bytes of `HTTP.BytesBody`
+without copying the payload or advancing its cursor. Keep the original upload
+storage unchanged until the request and all retries finish. AWS SigV4 still
+hashes every payload byte; avoiding a copy does not skip authentication. AWS
+SigV2 form signing creates replacement form bytes instead of modifying the
+caller's payload.
+
+CloudBase signs each HTTP request attempt separately. Pass `HTTP.Headers` and
+`copyheaders=false` only when the collection belongs exclusively to that
+operation. This ownership option requires an HTTP version that implements it;
+HTTP 2.7.1 and earlier HTTP 2 releases accept but ignore it. The default preserves
+caller headers. Reuse `HTTP.Client` through the `client` keyword for connection
+reuse. See HTTP's buffered-transfer ownership documentation for details.

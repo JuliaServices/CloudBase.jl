@@ -49,14 +49,27 @@ expired(x) = x.expiration !== nothing && Dates.now(Dates.UTC) > (x.expiration - 
 # HTTP 2 request bodies are typed objects rather than raw bytes, and `HTTP.isbytes`
 # no longer exists. Signing needs the payload bytes for its SHA-256/HMAC.
 requestbodybytes(request::HTTP.Request) = bodybytes(request.body)
-bodybytes(body::HTTP.BytesBody) = copy(body)
+# Signing borrows unread bytes. It must neither consume the cursor nor change
+# storage shared by replay attempts. SigV2 copies explicitly before String().
+bodybytes(body::HTTP.BytesBody) = body.next_index == 1 ? body.data : view(body.data, body.next_index:length(body.data))
 bodybytes(::HTTP.EmptyBody) = UInt8[]
-bodybytes(body::AbstractVector{UInt8}) = body
-bodybytes(body::AbstractString) = Vector{UInt8}(codeunits(String(body)))
 function bodybytes(body)
     throw(ArgumentError(
         "cloud request signing requires a buffered request body; got $(typeof(body))",
     ))
+end
+
+payloadsha256(body) = sha256(body)
+
+# SHA's block copies perform alias checks. For immutable String-backed bytes,
+# those checks can hash the whole string for every 64-byte block. Borrow a
+# non-owning array only for the duration of hashing, with the owner GC-rooted.
+const StringBytes = Base.CodeUnits{UInt8,<:Union{String,SubString{String}}}
+function payloadsha256(body::Union{StringBytes,SubArray{UInt8,1,<:StringBytes,Tuple{UnitRange{Int}},true}})
+    GC.@preserve body begin
+        bytes = unsafe_wrap(Vector{UInt8}, pointer(body), length(body); own=false)
+        return sha256(bytes)
+    end
 end
 
 include("aws.jl")
@@ -167,6 +180,7 @@ function cloudhttpkwargs(provider, uri, credentials, httpkw)
         httpkw = merge((read_idle_timeout=300,), httpkw)
     end
     if provider === :azure && uri.host == "127.0.0.1" &&
+            get(httpkw, :client, nothing) === nothing &&
             !haskey(httpkw, :require_ssl_verification)
         httpkw = merge((require_ssl_verification=false,), httpkw)
     end
