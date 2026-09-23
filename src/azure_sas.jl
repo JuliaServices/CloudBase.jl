@@ -260,7 +260,8 @@ struct SignedSnapshotTime
 end
 
 function getCanonicalizedResource(url)
-    ok, service, host, account, container, blob = parseAzureAccountContainerBlob(string(url); parseLocal=true)
+    resource_url = first(split(string(url), ['?', '#']; limit=2))
+    ok, service, host, account, container, blob = parseAzureAccountContainerBlob(string(resource_url); parseLocal=true)
     ok || throw(ArgumentError("unable to parse azure account from url: `$url`"))
     if service == "table"
         # Employees(PartitionKey='Jeff',RowKey='Price')
@@ -268,7 +269,9 @@ function getCanonicalizedResource(url)
         m = match(r"^(?<table>.*?)(?<pk>\(PartitionKey='(?<pkv>.*?)',RowKey='(?<rkv>.*?)'\))?$", container)
         container = lowercase(m[:table])
     end
-    return rstrip(joinpath("/", service, account, container, blob), '/'), service
+    # Azure signs decoded URL paths; slashes in blob names are object-name bytes.
+    resource = string("/", service, "/", account, "/", container, isempty(blob) ? "" : "/" * blob)
+    return URIs.unescapeuri(resource), service
 end
 
 function generateServiceSASToken(url::URI, key::String;

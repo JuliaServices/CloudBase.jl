@@ -241,6 +241,16 @@ if !x32bit
         resp = HTTP.put(sas, ["x-ms-blob-type" => "BlockBlob"], csv; require_ssl_verification=false)
         resp = HTTP.get(sas; require_ssl_verification=false)
         @test String(resp.body) == csv
+        # Sign decoded object names without URL query or fragment components.
+        for name in ("with%20space", "with%2520literal", "folder/", "/leading", "plain?timeout=30", "plain#fragment")
+            url = "$(container.baseurl)$(name)"
+            account_sas = CloudBase.generateAccountSASURI(url, key; signedPermission=CloudBase.SignedPermission("rw"))
+            HTTP.put(account_sas, ["x-ms-blob-type" => "BlockBlob"], csv; require_ssl_verification=false)
+            service_sas = CloudBase.generateServiceSASURI(url, key)
+            response = HTTP.get(service_sas; require_ssl_verification=false, status_exception=false)
+            @test response.status == 200
+            @test String(response.body) == csv
+        end
         # token for authorization
         creds = Azure.Credentials(CloudBase.generateAccountSASToken(credentials.auth.account, key; signedPermission=CloudBase.SignedPermission("rw")))
         resp = Azure.put("$(container.baseurl)test4", ["x-ms-blob-type" => "BlockBlob"], csv; credentials=creds)
@@ -998,6 +1008,17 @@ end
     @test res isa Tuple
     @test res[1] == "/blob/acct/cont/blob"
     @test res[2] == "blob"
+
+    for (path, expected) in (("with%20space", "with space"), ("with%2520literal", "with%20literal"),
+                             ("folder/", "folder/"), ("/leading", "/leading"),
+                             ("plain?timeout=30", "plain"), ("plain#fragment", "plain"),
+                             ("folder//name", "folder//name"))
+        url = URIs.URI("https://acct.blob.core.windows.net/cont/" * path)
+        @test CloudBase.getCanonicalizedResource(url) == ("/blob/acct/cont/" * expected, "blob")
+    end
+
+    @test CloudBase.getCanonicalizedResource("azure://acct/cont/name%20value?timeout=30") ==
+        ("/blob/acct/cont/name value", "blob")
 
     # the user-delegation SAS entry points must resolve to real methods
     @test hasmethod(CloudBase.generateUserDelegationSASToken, Tuple{String})
