@@ -4,21 +4,6 @@ export TempFile, Minio, Azurite, ECS, EC2, AzureVM, GCPTokenServer, GCPMetadata,
 
 import ..CloudCredentials, ..AWS, ..Azure, ..AbstractStore
 
-const INTERPRETER = Ref{String}()
-
-function __init__()
-    try
-        # When using julia from nix, set INTERPRETER, to make sure the correct
-        # dynamic loader and glibc is used (e.g. in case of glibc mismatch between
-        # nix build and system glibc).
-        if startswith(Base.julia_cmd()[1], "/nix/") && success(`which patchelf`)
-            INTERPRETER[] = strip(read(`patchelf --print-interpreter $(unsafe_string(Base.JLOptions().julia_bin))`, String))
-        end
-    catch
-    end
-    return
-end
-
 """
     _cmd(`cmd`)
 
@@ -30,10 +15,19 @@ julia> run(_cmd(`ls`))
 ```
 """
 function _cmd(tool)
-    # When on system (mostly NixOS) where /lib64/ld-linux-x86-64.so.2 is not available,
-    # use the ELF interpreter from the julia binary
-    if Sys.islinux() && isdefined(INTERPRETER, :x)
-        pushfirst!(tool.exec, INTERPRETER[])
+    # On Nix, use Julia's ELF interpreter to avoid mixing glibc versions.
+    # Discover it at emulator launch so importing CloudBase does not run test tools.
+    if Sys.islinux()
+        interpreter = try
+            if startswith(Base.julia_cmd()[1], "/nix/") && success(`which patchelf`)
+                strip(read(`patchelf --print-interpreter $(unsafe_string(Base.JLOptions().julia_bin))`, String))
+            end
+        catch
+            nothing
+        end
+        if interpreter !== nothing
+            pushfirst!(tool.exec, interpreter)
+        end
     end
     return tool
 end
