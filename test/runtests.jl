@@ -898,7 +898,7 @@ end
     r = mkreq("https://example.com/path")
     signreq!(r, "https://example.com/path"; credentials=creds, service="s3", region="us-east-1")
     @test occursin("AWS4-HMAC-SHA256", HTTP.header(r, "Authorization"))
-    @test occursin("SignedHeaders=host;x-amz-date", HTTP.header(r, "Authorization"))
+    @test occursin("SignedHeaders=host;x-amz-content-sha256;x-amz-date", HTTP.header(r, "Authorization"))
 
     # debug=true previously referenced undefined variables
     r = mkreq("https://s3.us-west-2.amazonaws.com/b/k")
