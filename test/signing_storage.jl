@@ -28,6 +28,69 @@
     @test allocations[2] <= allocations[1] + 4096
 end
 
+@testset "Signing uses complete final headers" begin
+    credentials = AWS.Credentials("fixture-key", "fixture-secret")
+    url = HTTP.URI("https://s3.us-east-1.amazonaws.com/bucket/key")
+    sign(req; kw...) = CloudBase.awssign!(req, url; credentials,
+        x_amz_date=DateTime(2026, 9, 26), kw...)
+    data = collect(codeunits("body"))
+    fresh = HTTP.Request("PUT", "/bucket/key"; body=data)
+    sign(fresh)
+    @test occursin("SignedHeaders=host;x-amz-content-sha256;x-amz-date,", HTTP.header(fresh, "Authorization"))
+    for value in ("stale", bytes2hex(CloudBase.sha256(data)), "")
+        request = HTTP.Request("PUT", "/bucket/key"; body=data,
+            headers=["x-amz-content-sha256" => value])
+        sign(request)
+        @test HTTP.header(request, "Authorization") == HTTP.header(fresh, "Authorization")
+        @test CloudBase.requestbodybytes(request) === data
+    end
+    data[1] = 0x42
+    sign(fresh)
+    expected = HTTP.Request("PUT", "/bucket/key"; body=data)
+    sign(expected)
+    @test HTTP.header(fresh, "Authorization") == HTTP.header(expected, "Authorization")
+    @test fresh.body.next_index == 1
+
+    omitted = HTTP.Request("PUT", "/bucket/key"; body=data)
+    sign(omitted; includeContentSha256=false)
+    @test !HTTP.hasheader(omitted, "x-amz-content-sha256")
+    supplied = HTTP.Request("PUT", "/bucket/key"; body=data,
+        headers=["x-amz-content-sha256" => "caller-value"])
+    sign(supplied; includeContentSha256=false)
+    @test HTTP.header(supplied, "x-amz-content-sha256") == "caller-value"
+
+    for (input, canonical) in (
+        ["X" => ""] => ["x" => ""],
+        ["X" => "", "x" => ""] => ["x" => ","],
+        ["X" => "", "x" => " a\t  b ", "Y" => ""] => ["x" => ",a b", "y" => ""],
+        ["X" => "a", "X" => "", "X" => "b"] => ["x" => "a,,b"],
+        ["X" => " a\tb\t\tc "] => ["x" => "a b c"],
+    )
+        headers = map(CloudBase.canonicalHeader, input)
+        @test CloudBase.deduplicateHeaders!(headers) === nothing
+        @test headers == canonical
+    end
+    request = HTTP.Request("PUT", "/bucket/key"; body=data,
+        headers=["x-amz-meta-empty" => ""])
+    sign(request)
+    @test occursin(";x-amz-meta-empty,", HTTP.header(request, "Authorization"))
+end
+
+@testset "S3 verifies generated hashes and metadata headers" begin
+    Minio.with() do conf
+        credentials, bucket = conf
+        for headers in (
+            ["x-amz-content-sha256" => bytes2hex(CloudBase.sha256("old body"))],
+            ["x-amz-meta-space" => "a\t  b"],
+            ["x-amz-meta-empty" => ""],
+        )
+            response = AWS.put(bucket.baseurl * "/headers", headers, "body";
+                credentials, service="s3", region="us-east-1", retries=0)
+            @test response.status == 200
+        end
+    end
+end
+
 @testset "Explicit clients own TLS policy" begin
     client = HTTP.Client()
     try
