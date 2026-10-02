@@ -313,7 +313,7 @@ end
 # collector is free to reclaim before the resulting array is consumed. Copy instead; signing
 # is not hot enough for the alias to be worth the hazard.
 bytes(x::String) = Vector{UInt8}(codeunits(x))
-trimall(x) = strip(replace(x, r"[ ]{2,}" => " "))
+trimall(x) = strip(replace(x, r"[ \t]+" => " "))
 canonicalHeader(x::Pair) = strip(lowercase(x.first)) => trimall(x.second)
 const ISO8601 = dateformat"yyyymmdd\THHMMSS\Z"
 const ISO8601DATE = dateformat"yyyymmdd"
@@ -358,19 +358,16 @@ end
 function deduplicateHeaders!(headers)
     isempty(headers) && return
     j = 1
-    k, v = first(headers)
     for i = 2:length(headers)
-        k2, v2 = headers[i]
-        if k == k2
-            v = "$v,$v2"
-            headers[j] = k => v
-            headers[i] = k => ""
+        k, v = headers[i]
+        if k == headers[j].first
+            headers[j] = k => string(headers[j].second, ',', v)
         else
-            k, v = k2, v2
-            j = i
+            j += 1
+            headers[j] = k => v
         end
     end
-    filter!(x -> x.second != "", headers)
+    resize!(headers, j)
     return
 end
 
@@ -415,16 +412,16 @@ function awssign!(request::HTTP.Request, url::URI; service=nothing, region=nothi
     # SigV4 sorts the encoded parameter names and values, not their raw forms.
     canonicalQueryString = canonicalQuery(url)
     # @show url, queryparampairs(url), canonicalQueryString
-    headers = canonicalRequestHeaders(request, url)
-    # @show headers
-    canonicalHeaders = join(map(x -> "$(x.first):$(x.second)", headers), "\n")
-    signedHeaders = join(map(first, headers), ";")
     body = requestbodybytes(request)
     #TODO: handle streaming request bodies?
     payloadHash = bytes2hex(payloadsha256(body))
     if includeContentSha256
         HTTP.setheader(request, "x-amz-content-sha256" => payloadHash)
     end
+    # Canonicalize the final header values that will be sent on the wire.
+    headers = canonicalRequestHeaders(request, url)
+    canonicalHeaders = join(map(x -> "$(x.first):$(x.second)", headers), "\n")
+    signedHeaders = join(map(first, headers), ";")
 
     canonicalRequest = """$(request.method)
     $canonicalURI
