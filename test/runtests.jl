@@ -805,6 +805,19 @@ end
     test_output(GCP.Credentials("0123456789abcdef"))
 end
 
+@testset "emulator command preparation" begin
+    tool = addenv(`$(Base.julia_cmd()) --startup-file=no -e 'print(ENV["CLOUDBASE_CMD_TEST"])'`,
+        "CLOUDBASE_CMD_TEST" => "command environment preserved")
+    storage, environment = tool.exec, tool.env
+    original = copy(storage)
+    @test CloudTest._cmd(tool) === tool
+    @test tool.exec === storage
+    @test tool.env === environment
+    @test tool.exec[end-length(original)+1:end] == original
+    @test length(tool.exec) in (length(original), length(original) + 1)
+    @test read(tool, String) == "command environment preserved"
+end
+
 @testset "_wait_for_port" begin
     port, socket = Sockets.listenany(IPv4(0), rand(RandomDevice(), 10000:50000))
     try
