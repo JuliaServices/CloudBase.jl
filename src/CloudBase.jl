@@ -450,6 +450,7 @@ Acquire audience-specific bearer tokens using AKS workload identity. Identity se
 Each refresh rereads the projected token file and verifies TLS. Tokens are cached per credential
 object with synchronized refresh. Missing settings or exchange failures raise without trying
 storage keys, VM credentials, client secrets, or Azure CLI credentials. Acquisition is lazy.
+Pass an exact `https://` or `api://` resource URI; any trailing slash remains part of the audience.
 """
 const WorkloadIdentityCredentials = AzureWorkloadIdentityCredentials
 
@@ -460,6 +461,7 @@ Acquire audience-specific bearer tokens from Azure VM IMDS. `client_id` selects 
 identity and defaults to `AZURE_CLIENT_ID`; an empty ID requests the system-assigned identity.
 Tokens are cached per credential object with synchronized refresh. IMDS requests bypass proxies
 and redirects. This provider does not implement App Service's distinct identity endpoint protocol.
+Pass an exact `https://` or `api://` resource URI.
 """
 const ManagedIdentityCredentials = AzureManagedIdentityCredentials
 

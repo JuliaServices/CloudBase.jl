@@ -28,7 +28,8 @@ using Test, Dates, CloudBase, HTTP, JSON, Sockets
         @test !occursin("test-access-token", sprint(show, credentials))
         for (resource_uri, expected_scope) in (
                 ("https://management.azure.com/", "https://management.azure.com//.default"),
-                ("https://database.windows.net/", "https://database.windows.net//.default"))
+                ("https://database.windows.net/", "https://database.windows.net//.default"),
+                ("api://aaaabbbb-0000-cccc-1111-dddd2222eeee", "api://aaaabbbb-0000-cccc-1111-dddd2222eeee/.default"))
             scoped_credentials = CloudBase.Azure.WorkloadIdentityCredentials(; resource=resource_uri,
                 tenant_id="test-tenant", client_id="test-client", token_file)
             scope_request = function(method, url, headers, body; kw...)
@@ -91,6 +92,9 @@ using Test, Dates, CloudBase, HTTP, JSON, Sockets
         @test_throws ArgumentError CloudBase.Azure.WorkloadIdentityCredentials(; resource, tenant_id="tenant", client_id="client", token_file="file", authority_host)
     end
     @test_throws ArgumentError CloudBase.Azure.ManagedIdentityCredentials(; resource="http://example.com")
+    for invalid_resource in ("api://", "api://app?secret=value", "api://app#fragment", "api://user:secret@app")
+        @test_throws ArgumentError CloudBase.Azure.ManagedIdentityCredentials(; resource=invalid_resource)
+    end
     @test_throws ArgumentError CloudBase.Azure.ManagedIdentityCredentials(; resource, expireThreshold=Second(-1))
     @test_throws ArgumentError CloudBase.Azure.ManagedIdentityCredentials(; resource, endpoint="http://untrusted.example/token")
     calls = Ref(0)

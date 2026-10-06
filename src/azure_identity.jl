@@ -32,8 +32,8 @@ end
 
 function AzureIdentityCredentials(source, resource::AbstractString, expireThreshold::Dates.Period)
     uri = URI(resource)
-    (uri.scheme == "https" && !isempty(uri.host) && isempty(uri.userinfo) && isempty(uri.query) && isempty(uri.fragment)) ||
-        throw(ArgumentError("Azure resource must be an HTTPS resource URI"))
+    (uri.scheme in ("https", "api") && !isempty(uri.host) && isempty(uri.userinfo) && isempty(uri.query) && isempty(uri.fragment)) ||
+        throw(ArgumentError("Azure resource must be an https:// or api:// URI"))
     threshold = convert(Dates.Millisecond, expireThreshold)
     threshold >= Dates.Millisecond(0) || throw(ArgumentError("expireThreshold must be nonnegative"))
     return AzureIdentityCredentials(ReentrantLock(), source, String(resource), AccessToken(""), nothing, threshold)
