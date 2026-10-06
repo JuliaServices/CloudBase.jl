@@ -74,6 +74,7 @@ end
 
 include("aws.jl")
 include("azure.jl")
+include("azure_identity.jl")
 include("gcp.jl")
 
 
@@ -392,7 +393,8 @@ just like the `HTTP` equivalents and supports all the same keyword arguments.
 module Azure
 
 using HTTP
-import ..cloudlayer, ..cloudopenlayer, ..cloudopen_do, ..AzureCredentials, ..AbstractStore
+import ..cloudlayer, ..cloudopenlayer, ..cloudopen_do, ..AzureCredentials, ..AbstractStore,
+    ..AzureWorkloadIdentityCredentials, ..AzureManagedIdentityCredentials, ..azureAccessToken
 
 HTTP.@client (cloudlayer(:azure),) (cloudopenlayer(:azure),)
 
@@ -439,6 +441,39 @@ are also automatically detected and retrieved. Temporary credentials via Azure V
 will automatically be refreshed `expireThreshold` before expiration when a request is made.
 """
 const Credentials = AzureCredentials
+
+"""
+    CloudBase.Azure.WorkloadIdentityCredentials(; resource, tenant_id, client_id, token_file, authority_host, expireThreshold=Minute(5))
+
+Acquire audience-specific bearer tokens using AKS workload identity. Identity settings default to
+`AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_FEDERATED_TOKEN_FILE`, and `AZURE_AUTHORITY_HOST`.
+Each refresh rereads the projected token file and verifies TLS. Tokens are cached per credential
+object with synchronized refresh. Missing settings or exchange failures raise without trying
+storage keys, VM credentials, client secrets, or Azure CLI credentials. Acquisition is lazy.
+Pass an exact `https://` or `api://` resource URI; any trailing slash remains part of the audience.
+"""
+const WorkloadIdentityCredentials = AzureWorkloadIdentityCredentials
+
+"""
+    CloudBase.Azure.ManagedIdentityCredentials(; resource, client_id="", expireThreshold=Minute(5))
+
+Acquire audience-specific bearer tokens from Azure VM IMDS. `client_id` selects a user-assigned
+identity and defaults to `AZURE_CLIENT_ID`; an empty ID requests the system-assigned identity.
+Tokens are cached per credential object with synchronized refresh. IMDS requests bypass proxies
+and redirects. This provider does not implement App Service's distinct identity endpoint protocol.
+Pass an exact `https://` or `api://` resource URI.
+Transient IMDS failures get up to five retries with exponential delays capped at 60 seconds.
+Each attempt has a five-second connection timeout and a 30-second request deadline.
+"""
+const ManagedIdentityCredentials = AzureManagedIdentityCredentials
+
+"""
+    CloudBase.Azure.access_token(credentials)
+
+Return a bearer token from workload or managed identity credentials, refreshing before expiry.
+An unsuccessful refresh raises; an expired or near-expiry token is never returned.
+"""
+const access_token = azureAccessToken
 
 """
     CloudBase.Azure.Container(name, account)
