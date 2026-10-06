@@ -120,7 +120,7 @@ function azureIdentityToken(source::AzureWorkloadIdentity, resource; request=azu
     isempty(assertion) && throw(AzureIdentityError("Azure workload identity federated token file is empty"))
     body = HTTP.escapeuri(Dict(
         "client_id" => source.client_id,
-        "scope" => rstrip(resource, '/') * "/.default",
+        "scope" => resource * "/.default",
         "grant_type" => "client_credentials",
         "client_assertion_type" => "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
         "client_assertion" => assertion,

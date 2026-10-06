@@ -26,6 +26,18 @@ using Test, Dates, CloudBase, HTTP, JSON, Sockets
         @test CloudBase.Azure.access_token(credentials) == "test-access-token"
         @test length(calls) == 1
         @test !occursin("test-access-token", sprint(show, credentials))
+        for (resource_uri, expected_scope) in (
+                ("https://management.azure.com/", "https://management.azure.com//.default"),
+                ("https://database.windows.net/", "https://database.windows.net//.default"))
+            scoped_credentials = CloudBase.Azure.WorkloadIdentityCredentials(; resource=resource_uri,
+                tenant_id="test-tenant", client_id="test-client", token_file)
+            scope_request = function(method, url, headers, body; kw...)
+                form = Dict(HTTP.URIs.queryparampairs(HTTP.URI("http://localhost/?$body")))
+                @test form["scope"] == expected_scope
+                return response()
+            end
+            @test CloudBase.getCredentials(scoped_credentials; request=scope_request).token == "test-access-token"
+        end
         write(token_file, "rotated-assertion")
         credentials.expiration = now(UTC) + Minute(5)
         @test CloudBase.getCredentials(credentials; request).token == "test-access-token"
