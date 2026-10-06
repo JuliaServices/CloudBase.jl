@@ -2,6 +2,8 @@ using CloudBase, Test, CloudBase.CloudTest, JSON3, JSON, Dates, HTTP, OpenSSL
 using CloudBase: AWS, Azure, GCP
 using Sockets, Random
 
+include("azure_identity.jl")
+
 const x32bit = Sys.WORD_SIZE == 32
 
 function verifyRS256(private_key::String, message::String, signature::Vector{UInt8})
