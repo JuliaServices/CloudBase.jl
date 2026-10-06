@@ -462,6 +462,8 @@ identity and defaults to `AZURE_CLIENT_ID`; an empty ID requests the system-assi
 Tokens are cached per credential object with synchronized refresh. IMDS requests bypass proxies
 and redirects. This provider does not implement App Service's distinct identity endpoint protocol.
 Pass an exact `https://` or `api://` resource URI.
+Transient IMDS failures get up to five retries with exponential delays capped at 60 seconds.
+Each attempt has a five-second connection timeout and a 30-second request deadline.
 """
 const ManagedIdentityCredentials = AzureManagedIdentityCredentials
 

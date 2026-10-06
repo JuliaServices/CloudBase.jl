@@ -67,13 +67,21 @@ function AzureManagedIdentityCredentials(; resource::AbstractString,
     return AzureIdentityCredentials(AzureManagedIdentity(String(client_id), String(endpoint)), resource, expireThreshold)
 end
 
-function azureIdentityRequest(method, url, headers, body=""; kw...)
-    response = try
-        HTTP.request(method, url, headers, body; status_exception=false, redirect=false, retry=false,
-            connect_timeout=5, request_timeout=30, require_ssl_verification=true, kw...)
-    catch err
-        err isa InterruptException && rethrow()
-        nothing
+function azureIdentityRequest(method, url, headers, body=""; retry_imds=false, pause=sleep,
+        connect_timeout=5, request_timeout=30, kw...)
+    delays = retry_imds && method == "GET" ? (2, 6, 14, 30, 60) : ()
+    response = nothing
+    for attempt in 1:(length(delays) + 1)
+        response = try
+            HTTP.request(method, url, headers, body; status_exception=false, redirect=false, retry=false,
+                connect_timeout, request_timeout, require_ssl_verification=true, kw...)
+        catch err
+            err isa InterruptException && rethrow()
+            nothing
+        end
+        retryable = response === nothing || response.status in (404, 410, 429) || 500 <= response.status < 600
+        (attempt > length(delays) || !retryable) && break
+        pause(delays[attempt])
     end
     response === nothing && throw(AzureIdentityError("Azure identity token request failed during transport or TLS verification"))
     200 <= response.status < 300 || throw(AzureIdentityError("Azure identity token request failed (HTTP $(response.status))"))
@@ -136,7 +144,7 @@ end
 function azureIdentityToken(source::AzureManagedIdentity, resource; request=azureIdentityRequest)
     query = Dict("api-version" => "2018-02-01", "resource" => resource)
     isempty(source.client_id) || (query["client_id"] = source.client_id)
-    response = request("GET", source.endpoint, ["Metadata" => "true"]; query, proxy=nothing)
+    response = request("GET", source.endpoint, ["Metadata" => "true"]; query, proxy=nothing, retry_imds=true)
     payload = azureIdentityPayload(response)
     expiration = Dates.unix2datetime(azureIdentitySeconds(payload, "expires_on"))
     return azureIdentityToken(payload), expiration

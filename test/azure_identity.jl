@@ -119,6 +119,90 @@ using Test, Dates, CloudBase, HTTP, JSON, Sockets
     finally
         close(server)
     end
+    @testset "Transient IMDS recovery" begin
+        attempts = Ref(0)
+        server = HTTP.serve!("127.0.0.1", 0) do request
+            attempts[] += 1
+            return attempts[] == 1 ? HTTP.Response(503, "private-error-body") : response()
+        end
+        try
+            port = HTTP.port(server)
+            credentials = CloudBase.Azure.ManagedIdentityCredentials(; resource,
+                endpoint="http://127.0.0.1:$port/metadata/identity/oauth2/token")
+            @test CloudBase.Azure.access_token(credentials) == "test-access-token"
+            @test attempts[] == 2
+        finally
+            close(server)
+        end
+    end
+    @testset "IMDS retry policy" begin
+        for status in (404, 410, 429, 500, 599, 400, 401, 403, 302)
+            attempts = Ref(0)
+            delays = Int[]
+            server = HTTP.serve!("127.0.0.1", 0) do request
+                attempts[] += 1
+                return attempts[] == 1 ? HTTP.Response(status, "private-error-body") : response()
+            end
+            try
+                port = HTTP.port(server)
+                credentials = CloudBase.Azure.ManagedIdentityCredentials(; resource,
+                    endpoint="http://127.0.0.1:$port/metadata/identity/oauth2/token")
+                request = (args...; kw...) -> CloudBase.azureIdentityRequest(args...; kw..., pause=delay -> push!(delays, delay))
+                if status in (404, 410, 429, 500, 599)
+                    @test CloudBase.getCredentials(credentials; request).token == "test-access-token"
+                    @test attempts[] == 2
+                    @test delays == [2]
+                else
+                    @test_throws CloudBase.AzureIdentityError CloudBase.getCredentials(credentials; request)
+                    @test attempts[] == 1
+                    @test isempty(delays)
+                end
+            finally
+                close(server)
+            end
+        end
+        attempts = Ref(0)
+        delays = Int[]
+        server = HTTP.serve!("127.0.0.1", 0) do request
+            attempts[] += 1
+            return HTTP.Response(503, "private-error-body")
+        end
+        try
+            port = HTTP.port(server)
+            err = try
+                CloudBase.azureIdentityRequest("GET", "http://127.0.0.1:$port/token", Pair{String,String}[];
+                    retry_imds=true, pause=delay -> push!(delays, delay))
+                nothing
+            catch err
+                err
+            end
+            @test err isa CloudBase.AzureIdentityError
+            @test attempts[] == 6
+            @test delays == [2, 6, 14, 30, 60]
+            @test !occursin("private-error-body", sprint(showerror, err))
+            attempts[] = 0
+            empty!(delays)
+            @test_throws CloudBase.AzureIdentityError CloudBase.azureIdentityRequest("POST", "http://127.0.0.1:$port/token",
+                Pair{String,String}[]; retry_imds=true, pause=delay -> push!(delays, delay))
+            @test attempts[] == 1
+            @test isempty(delays)
+        finally
+            close(server)
+        end
+        delays = Int[]
+        server = HTTP.serve!("127.0.0.1", 0) do request
+            sleep(0.1)
+            return response()
+        end
+        try
+            port = HTTP.port(server)
+            @test_throws CloudBase.AzureIdentityError CloudBase.azureIdentityRequest("GET", "http://127.0.0.1:$port/token",
+                Pair{String,String}[]; retry_imds=true, request_timeout=0.01, pause=delay -> push!(delays, delay))
+            @test delays == [2, 6, 14, 30, 60]
+        finally
+            close(server)
+        end
+    end
     redirects = Ref(0)
     server = HTTP.serve!("127.0.0.1", 0) do request
         redirects[] += 1
