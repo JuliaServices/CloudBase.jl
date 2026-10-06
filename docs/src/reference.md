@@ -3,9 +3,9 @@
 ## Azure identity
 
 ```@docs
-Azure.WorkloadIdentityCredentials
-Azure.ManagedIdentityCredentials
-Azure.access_token
+CloudBase.Azure.WorkloadIdentityCredentials
+CloudBase.Azure.ManagedIdentityCredentials
+CloudBase.Azure.access_token
 ```
 
 ## GCP
