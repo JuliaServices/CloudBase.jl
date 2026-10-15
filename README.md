@@ -2,7 +2,7 @@
 # CloudBase
 
 [![CI](https://github.com/JuliaServices/CloudBase.jl/workflows/CI/badge.svg)](https://github.com/JuliaServices/CloudBase.jl/actions?query=workflow%3ACI)
-[![codecov](https://codecov.io/gh/JuliaServices/CloudBase.jl/branch/master/graph/badge.svg)](https://codecov.io/gh/JuliaServices/CloudBase.jl)
+[![codecov](https://codecov.io/gh/JuliaServices/CloudBase.jl/branch/main/graph/badge.svg)](https://codecov.io/gh/JuliaServices/CloudBase.jl)
 [![deps](https://juliahub.com/docs/CloudBase/deps.svg)](https://juliahub.com/ui/Packages/CloudBase/HHBkp?t=2)
 [![version](https://juliahub.com/docs/CloudBase/version.svg)](https://juliahub.com/ui/Packages/CloudBase/HHBkp)
 [![pkgeval](https://juliahub.com/docs/CloudBase/pkgeval.svg)](https://juliahub.com/ui/Packages/CloudBase/HHBkp)
@@ -25,7 +25,7 @@ The package is registered in the [`General`](https://github.com/JuliaRegistries/
 
 ## Project Status
 
-The package is tested against Julia `1.9`, current stable release, and nightly on Linux.
+The package is tested against Julia 1.10, the current stable release, and nightly on Linux.
 Default CI stays fully local/mock-based. There is also an opt-in live GCP smoke test in `test/runtests.jl` that exercises one real object write/read/delete round-trip against an existing bucket.
 
 Live test environment:
@@ -52,9 +52,9 @@ Contributions are very welcome, as are feature requests and suggestions. Please 
 [docs-stable-url]: https://juliaservices.github.io/CloudBase.jl/stable
 
 [ci-img]: https://github.com/JuliaServices/CloudBase.jl/workflows/CI/badge.svg
-[ci-url]: https://github.com/JuliaServices/CloudBase.jl/actions?query=workflow%3ACI+branch%3Amaster
+[ci-url]: https://github.com/JuliaServices/CloudBase.jl/actions?query=workflow%3ACI+branch%3Amain
 
-[codecov-img]: https://codecov.io/gh/JuliaServices/CloudBase.jl/branch/master/graph/badge.svg
+[codecov-img]: https://codecov.io/gh/JuliaServices/CloudBase.jl/branch/main/graph/badge.svg
 [codecov-url]: https://codecov.io/gh/JuliaServices/CloudBase.jl
 
 [issues-url]: https://github.com/JuliaServices/CloudBase.jl/issues
