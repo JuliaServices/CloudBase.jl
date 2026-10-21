@@ -1,7 +1,5 @@
 module CloudBase
 
-export CloudTest
-
 using Dates, Base64, Random, Sockets
 using HTTP, URIs, SHA, MD5, LoggingExtras, Figgy, JSON, OpenSSL
 
@@ -572,7 +570,5 @@ struct Bucket <: AbstractStore
 end
 
 end # module GCP
-
-include("CloudTest.jl")
 
 end # module CloudBase
