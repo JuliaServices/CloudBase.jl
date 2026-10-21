@@ -71,16 +71,17 @@ Creating a bucket with `x-amz-bucket-object-lock-enabled: true` also enables
 versioning. The credentials must permit bucket creation, retention configuration,
 and the object operations below.
 
-This executable example starts a temporary local MinIO server. It sets a one-day
+This executable example uses the test-only CloudBaseTest.jl package to start a
+temporary local MinIO server. It sets a one-day
 GOVERNANCE retention rule, uploads one object, and checks that its protected
 version remains readable after an ordinary delete. `Minio.with` stops the server
 and removes its temporary data when the callback ends.
 
 ```@example object_lock
-using CloudBase, HTTP, Base64, MD5
+using CloudBase, CloudBaseTest, HTTP, Base64, MD5
 const AWS = CloudBase.AWS
 
-CloudBase.CloudTest.Minio.with() do config
+CloudBaseTest.Minio.with() do config
     bucket = AWS.Bucket("retention-example";
         host="http://127.0.0.1:$(config.port)")
     options = (; credentials=config.credentials, service="s3", region="us-east-1")
