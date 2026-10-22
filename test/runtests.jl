@@ -397,6 +397,49 @@ end
     end
 end
 
+@testset "Redirects sign only the original origin" begin
+    seen = Channel{Any}(Inf)
+    record(request) = put!(seen, (target=request.target,
+        authorization=HTTP.header(request, "Authorization", ""),
+        token=HTTP.header(request, "x-amz-security-token", "")))
+    other = HTTP.serve!("127.0.0.1", 0) do request
+        record(request)
+        return HTTP.Response(200, "other")
+    end
+    other_port = HTTP.port(other)
+    cloud = HTTP.serve!("127.0.0.1", 0) do request
+        if startswith(request.target, "/cross")
+            return HTTP.Response(307, ["Location" => "http://127.0.0.1:$other_port/landed"], "")
+        elseif startswith(request.target, "/same")
+            return HTTP.Response(307, ["Location" => "/landed"], "")
+        end
+        record(request)
+        return HTTP.Response(200, "cloud")
+    end
+    base = "http://127.0.0.1:$(HTTP.port(cloud))"
+    aws = AWS.Credentials("AKIDEXAMPLE", "SECRET", "SESSION-TOKEN")
+    try
+        for (request, secret) in (
+                (path -> AWS.get(base * path; service="s3", credentials=aws), "SESSION-TOKEN"),
+                (path -> Azure.get(base * path; credentials=Azure.Credentials("AZURE-BEARER")), "AZURE-BEARER"),
+                (path -> Azure.get(base * path; credentials=Azure.Credentials("sv=2020-12-06&sig=SAS-SIG")), "SAS-SIG"),
+                (path -> GCP.get(base * path; credentials=GCP.Credentials("GCP-BEARER")), "GCP-BEARER"))
+            @test String(request("/cross").body) == "other"
+            hit = take!(seen)
+            @test startswith(hit.target, "/landed")
+            @test isempty(hit.authorization) && isempty(hit.token)
+            @test !occursin(secret, hit.target)
+            # A same-origin redirect is signed again for its new target.
+            @test String(request("/same").body) == "cloud"
+            hit = take!(seen)
+            @test occursin(secret, string(hit.target, hit.authorization, hit.token))
+        end
+    finally
+        close(cloud)
+        close(other)
+    end
+end
+
 @testset "GCP Service Account" begin
     request_ref = Ref{Any}()
     GCPTokenServer.with(; request_ref=request_ref) do request_count

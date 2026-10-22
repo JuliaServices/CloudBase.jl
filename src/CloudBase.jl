@@ -167,7 +167,8 @@ attempt and records metrics.
 Signing happens on `RequestEvent`, which HTTP emits immediately before *each* attempt,
 so a retried request is re-signed with a fresh timestamp - the same guarantee the HTTP 1
 stream layer provided. `HTTP.Request` no longer carries a `.url`, so the absolute URL is
-taken from the event.
+taken from the event. Only attempts to the original scheme, host, and port are signed;
+a redirect to any other origin is sent without credentials.
 """
 # Kwargs consumed by the signers rather than by HTTP. In HTTP 1 the layers absorbed
 # these; HTTP 2 validates its keyword arguments, so they must be split out explicitly.
@@ -186,6 +187,14 @@ function cloudhttpkwargs(provider, uri, credentials, httpkw)
     return httpkw
 end
 
+# Scheme, host, and port, with the default port filled in: HTTP event URLs always
+# carry a port, caller URLs often do not.
+function origin(uri::URI)
+    scheme = lowercase(String(uri.scheme))
+    port = isempty(uri.port) ? (scheme == "https" ? "443" : "80") : String(uri.port)
+    return (scheme, lowercase(rstrip(String(uri.host), '.')), port)
+end
+
 function cloudlayer(provider::Symbol)
     return function(handler)
         return function(method, url, headers=Pair{String,String}[], body=nothing;
@@ -197,10 +206,15 @@ function cloudlayer(provider::Symbol)
             httpkw = cloudhttpkwargs(provider, uri, credentials, httpkw)
             stats = CloudRequestStats()
             PREREQUEST_CALLBACK[](String(method))
+            signed_origin = origin(uri)
             tracer = function(ev)
                 if ev isa HTTP.RequestEvent
                     request_uri = URI(ev.url)
-                    if provider === :aws && awsv2
+                    if origin(request_uri) != signed_origin
+                        # Each attempt starts from the unsigned request. One redirected to
+                        # another origin stays unsigned, as HTTP strips its `Authorization`.
+                        nothing
+                    elseif provider === :aws && awsv2
                         signed_body = awssignv2!(ev.request, request_uri; credentials, signkw...)
                         if signed_body !== nothing
                             ev.request.body isa HTTP.BytesBody ||
