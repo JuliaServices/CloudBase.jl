@@ -26,20 +26,6 @@ abstract type AbstractStore end
 
 _some(x, y) = x === nothing ? y : x
 
-# utility to check if an ip:port can be connected to
-function canconnect(ip, port, timeout=0.01)
-    tcp = Sockets.TCPSocket()
-    try
-        Sockets.connect!(tcp, ip, port)
-        sleep(timeout)
-        return tcp.status == Base.StatusOpen
-    catch
-        return false
-    finally
-        close(tcp)
-    end
-end
-
 # expiration check for credential types that support refreshing
 expired(x) = x.expiration !== nothing && Dates.now(Dates.UTC) > (x.expiration - x.expireThreshold)
 

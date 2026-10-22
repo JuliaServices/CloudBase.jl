@@ -692,6 +692,24 @@ end
     end
 end
 
+@testset "GCP metadata detection" begin
+    flavor = Ref(true)
+    server = HTTP.serve!("127.0.0.1", 0) do request
+        (request.target == "/computeMetadata/v1/" && HTTP.header(request, "Metadata-Flavor") == "Google") ||
+            return HTTP.Response(404)
+        return HTTP.Response(200, flavor[] ? ["Metadata-Flavor" => "Google"] : Pair{String,String}[], "")
+    end
+    root = "http://127.0.0.1:$(HTTP.port(server))"
+    try
+        @test CloudBase.metadataAvailable(root)
+        flavor[] = false  # another server on that address is not the metadata server
+        @test !CloudBase.metadataAvailable(root)
+    finally
+        close(server)
+    end
+    @test !CloudBase.metadataAvailable(root)
+end
+
 @testset "GCP Metadata" begin
     request_ref = Ref{Any}()
     GCPMetadata.with(; request_ref=request_ref) do request_count

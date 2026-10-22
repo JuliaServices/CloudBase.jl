@@ -219,12 +219,20 @@ function gcpLoadConfig!(scopes::Vector{String}=copy(GCP_DEFAULT_SCOPES), expireT
     return credentials
 end
 
+# Metadata requests go straight to the metadata server: no proxy, no redirects.
+const GCP_METADATA_KW = (proxy=nothing, redirect=false)
+
+# The metadata server identifies itself with `Metadata-Flavor: Google`, the check the
+# Google client libraries make; any other server on that host does not count.
 function metadataAvailable(root::String=GCP_DEFAULT_METADATA_ROOT)
-    uri = HTTP.URI(root)
-    host = something(uri.host, "")
-    isempty(host) && return false
-    port = uri.port == "" ? (uri.scheme == "https" ? 443 : 80) : parse(Int, uri.port)
-    return canconnect(host, port)
+    resp = try
+        HTTP.get(string(rstrip(root, '/'), "/computeMetadata/v1/"), ["Metadata-Flavor" => "Google"];
+            status_exception=false, connect_timeout=1, request_timeout=3, retry=false, GCP_METADATA_KW...)
+    catch err
+        err isa InterruptException && rethrow()
+        return false
+    end
+    return resp.status == 200 && HTTP.header(resp, "Metadata-Flavor") == "Google"
 end
 
 function jsonfield(obj, field::String)
@@ -359,7 +367,7 @@ function refresh!(x::GCPCredentials, source::ExternalAccountSource)
 end
 
 function refresh!(x::GCPCredentials, source::MetadataSource)
-    resp = HTTP.get(metadataTokenURL(source), ["Metadata-Flavor" => "Google"])
+    resp = HTTP.get(metadataTokenURL(source), ["Metadata-Flavor" => "Google"]; GCP_METADATA_KW...)
     payload = JSON.parse(resp.body)
     x.auth = GCPAccessToken(String(jsonfield(payload, "access_token")))
     x.expiration = tokenExpiration(jsonfield(payload, "expires_in"))
