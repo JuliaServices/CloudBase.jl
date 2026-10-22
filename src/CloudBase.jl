@@ -350,13 +350,18 @@ end
     CloudBase.AWS.Credentials([profile]; expireThreshold=Dates.Minute(5))
     CloudBase.AWS.Credentials(access_key_id, secret_access_key[, session_token])
 
-Credentials object used for authenticating AWS requests. By default, calling `AWS.Credentials()` or
-`AWS.Credentials(profile)`, will search the normal AWS credential locations (files, environment variables, etc.)
-to find the access key and secret. Otherwise, the 2nd constructor allows providing the access key & secret directly,
-ignoring any existing configurations. If a profile includes a `role_arn`, an STS request will be made with
-source credentials to get temporary credentials. AWS EC2 and ECS credentials are also automatically detected and
-retrieved. Temporary credentials via EC2, EC2, or role_arn that include expirations will automatically be refreshed
-`expireThreshold` before expiration when a request is made.
+Credentials object used for authenticating AWS requests. `AWS.Credentials()` takes all of its
+fields from the first of these that has credentials: the `AWS_ACCESS_KEY_ID` and
+`AWS_SECRET_ACCESS_KEY` environment variables; web identity from `AWS_ROLE_ARN` and
+`AWS_WEB_IDENTITY_TOKEN_FILE`; the `AWS_PROFILE` (or `default`) profile in the shared credentials
+and config files; the ECS container endpoint; EC2 instance metadata (IMDSv2, falling back to
+IMDSv1). `AWS.Credentials(profile)` uses that profile and skips the environment-variable sources.
+A profile with `role_arn` gets temporary credentials from STS using its `source_profile`,
+`credential_source`, or `web_identity_token_file`; `AWS_ENDPOINT_URL_STS` overrides the STS endpoint.
+The 2nd constructor uses the given keys and ignores all configuration.
+
+Loaded credentials that expire are reloaded `expireThreshold` before expiration when a request is
+made. If a reload fails, the current credentials stay in use until they expire.
 """
 const Credentials = AWSCredentials
 

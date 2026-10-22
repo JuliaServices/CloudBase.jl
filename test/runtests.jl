@@ -3,6 +3,7 @@ using CloudBase: AWS, Azure, GCP
 using Sockets, Random, URIs, Base64
 
 include("azure_identity.jl")
+include("aws_credentials.jl")
 
 const x32bit = Sys.WORD_SIZE == 32
 
