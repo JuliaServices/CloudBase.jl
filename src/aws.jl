@@ -1,8 +1,16 @@
 const AWS_CONFIGS = Figgy.Store()
+# Each load rewrites the shared store, so loads run one at a time.
+const AWS_LOAD_LOCK = ReentrantLock()
+# Settings of the most recent load. Cleared before each load so that one profile never
+# inherits another profile's role, region, or credentials.
+const AWS_PROFILE_KEYS = ("profile", "aws_config_file", "aws_shared_credentials_file",
+    "aws_access_key_id", "aws_secret_access_key", "aws_session_token", "expiration", "region",
+    "role_arn", "source_profile", "credential_source", "web_identity_token_file",
+    "role_session_name", "external_id", "duration_seconds")
 
 mutable struct AWSCredentials <: CloudCredentials
     lock::ReentrantLock
-    profile::String
+    profile::String # profile to reload; "" reloads the default chain
     access_key_id::String
     secret_access_key::String
     session_token::String
@@ -28,74 +36,111 @@ AWSCredentials(profile::String, access_key_id::String, secret_access_key::String
 AWSCredentials(access_key_id::String, secret_access_key::String, session_token::String="", expiration=nothing; expireThreshold::Dates.Period=Dates.Minute(5)) =
     AWSCredentials("", access_key_id, secret_access_key, session_token, expiration, expireThreshold)
 
-# accessor method that locks, checks expiration, and refreshes if necessary, before returning
-# individual credential pieces as NamedTuple; used in awssign!
+# Return the credential fields, reloading credentials that expire within `expireThreshold`.
+# If a reload fails or finds nothing, unexpired credentials stay in use and the next call
+# tries again; expired ones raise.
 function getCredentials(x::AWSCredentials)
     Base.@lock x.lock begin
         if expired(x)
-            awsLoadConfig!(x.profile, x.expireThreshold)
-            creds = AWS_CONFIGS["credentials"]
-            # we refreshed the credentials, now we update the fields of the original creds
-            x.access_key_id = creds.access_key_id
-            x.secret_access_key = creds.secret_access_key
-            x.session_token = creds.session_token
-            x.expiration = creds.expiration
+            fresh = try
+                awsLoadConfig!(x.profile, x.expireThreshold)
+            catch err
+                (err isa InterruptException || Dates.now(Dates.UTC) >= x.expiration) && rethrow()
+                nothing
+            end
+            if fresh !== nothing && !isempty(fresh.access_key_id)
+                x.access_key_id = fresh.access_key_id
+                x.secret_access_key = fresh.secret_access_key
+                x.session_token = fresh.session_token
+                x.expiration = fresh.expiration
+            elseif Dates.now(Dates.UTC) >= x.expiration
+                error("AWS credentials expired at $(x.expiration) UTC and could not be reloaded")
+            end
         end
         return (access_key_id=x.access_key_id, secret_access_key=x.secret_access_key, session_token=x.session_token)
     end
 end
 
 function AWSCredentials(profile::String="", load::Bool=true; expireThreshold=Dates.Minute(5))
-    load && awsLoadConfig!(profile, expireThreshold)
+    load && return awsLoadConfig!(profile, expireThreshold)
     return AWS_CONFIGS["credentials"]
 end
 
 getCredentialsFile() = get(AWS_CONFIGS, "aws_shared_credentials_file", joinpath(homedir(), ".aws", "credentials"))
 getConfigFile() = get(AWS_CONFIGS, "aws_config_file", joinpath(homedir(), ".aws", "config"))
 
+"""
+    awsLoadConfig!(profile="", expireThreshold=Minute(5)) -> AWSCredentials
+
+Load credentials the way the AWS SDKs do: the first provider that has credentials supplies
+all of them. Providers in order: `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`; web identity from
+`AWS_ROLE_ARN` and `AWS_WEB_IDENTITY_TOKEN_FILE`; the profile (credentials file `[name]`, config
+file `[profile name]`, with `role_arn` resolved through STS); the ECS container endpoint, which
+is final when configured; EC2 instance metadata. A nonempty `profile` names the profile and
+skips the two environment providers; otherwise `AWS_PROFILE` or `default` is used. The result
+is also stored as `AWS_CONFIGS["credentials"]`.
+"""
 function awsLoadConfig!(profile::String="", expireThreshold=Dates.Minute(5))
-    # on each fresh load, we want to clear out potentially stale credential fields
-    # note that each load, we *will* replace AWS_CONFIGS["credentials"]
-    # so we still keep track of their history bundled together
-    delete!(AWS_CONFIGS, "aws_access_key_id")
-    delete!(AWS_CONFIGS, "aws_secret_access_key")
-    delete!(AWS_CONFIGS, "aws_session_token")
-    delete!(AWS_CONFIGS, "expiration")
-    # first we load alternative config file locations & profile
-    # in case we should use those instead of defaults
-    Figgy.load!(AWS_CONFIGS, alternateConfigFileLocations(), awsProfileProgramArgument())
-    # now we do our full load
-    credFile = getCredentialsFile()
-    configFile = getConfigFile()
-    profile = !isempty(profile) ? profile : get(AWS_CONFIGS, "profile", "default")
-    if profile != "default"
-        profile = "profile $profile"
+    Base.@lock AWS_LOAD_LOCK begin
+        foreach(key -> delete!(AWS_CONFIGS, key), AWS_PROFILE_KEYS)
+        Figgy.load!(AWS_CONFIGS, alternateConfigFileLocations(), awsProfileProgramArgument())
+        credFile = getCredentialsFile()
+        configFile = getConfigFile()
+        name = isempty(profile) ? get(AWS_CONFIGS, "profile", "default") : profile
+        settings = awsProfileSettings(name, credFile, configFile)
+        # Settings such as `region` keep their precedence: arguments, environment, profile.
+        Figgy.load!(AWS_CONFIGS, awsProgramArguments(), awsConfigEnvironmentVariables(), settings)
+        foreach(key -> delete!(AWS_CONFIGS, key), ("aws_access_key_id", "aws_secret_access_key", "aws_session_token"))
+        creds = awsResolveCredentials(settings, isempty(profile), credFile, configFile)
+        credentials = creds === nothing ? AWSCredentials(profile, "", "", "", nothing, expireThreshold) :
+            AWSCredentials(profile, creds.access_key_id, creds.secret_access_key, creds.session_token, creds.expiration, expireThreshold)
+        Figgy.load!(AWS_CONFIGS, "credentials" => credentials)
+        return credentials
     end
-    Figgy.load!(AWS_CONFIGS,
-        awsProgramArguments(),
-        awsConfigEnvironmentVariables(),
-        Figgy.IniFile(credFile, profile),
-        Figgy.IniFile(configFile, profile),
-        ECSCredentialsSource(),
-        EC2CredentialsSource(),
-    )
-    if haskey(AWS_CONFIGS, "role_arn")
-        # if we have a role_arn, we need to call STS to get temporary credentials
-        loadRoleArn(AWS_CONFIGS["role_arn"], credFile, configFile)
+end
+
+function awsResolveCredentials(settings, chain::Bool, credFile, configFile)
+    if chain
+        env = Dict{String,String}(awsConfigEnvironmentVariables())
+        creds = awsStaticCredentials(env)
+        creds === nothing || return creds
+        haskey(env, "role_arn") && haskey(env, "web_identity_token_file") && return awsWebIdentity(env)
     end
-    # after doing a single config "load", we want to bundle the credentials
-    # together as one object in AWS_CONFIGS, so we know they all came "together"
-    exp = get(AWS_CONFIGS, "expiration", nothing)
-    expiration = exp === nothing ? exp : DateTime(rstrip(exp, 'Z'))
-    Figgy.load!(AWS_CONFIGS, "credentials" =>
-        AWSCredentials(profile,
-            get(AWS_CONFIGS, "aws_access_key_id", ""),
-            get(AWS_CONFIGS, "aws_secret_access_key", ""),
-            get(AWS_CONFIGS, "aws_session_token", ""),
-            expiration, expireThreshold
-        )
-    )
-    return
+    creds = awsProfileCredentials(settings, credFile, configFile)
+    creds === nothing || return creds
+    # A configured container endpoint is final: never fall back to the host's role.
+    isempty(get(ENV, "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI", "")) || return awsSourceCredentials(ECSCredentialsSource())
+    return awsSourceCredentials(EC2CredentialsSource())
+end
+
+# Profile `name` from the credentials file section `[name]` and the config file section
+# `[profile name]` (`[default]` for the default profile). The credentials file wins.
+function awsProfileSettings(name, credFile, configFile)
+    settings = Dict{String,String}()
+    section = name == "default" ? name : "profile $name"
+    for source in (Figgy.IniFile(credFile, name), Figgy.IniFile(configFile, section))
+        for (key, value) in Figgy.load(source)
+            get!(settings, key, value)
+        end
+    end
+    return settings
+end
+
+function awsStaticCredentials(settings)
+    key = get(settings, "aws_access_key_id", "")
+    secret = get(settings, "aws_secret_access_key", "")
+    (isempty(key) || isempty(secret)) && return nothing
+    expiration = get(settings, "expiration", nothing)
+    return (access_key_id=String(key), secret_access_key=String(secret),
+        session_token=String(get(settings, "aws_session_token", "")),
+        expiration=expiration === nothing ? nothing : DateTime(rstrip(expiration, 'Z')))
+end
+
+function awsSourceCredentials(source)
+    settings = Dict{String,Any}(Figgy.load(source))
+    region = get(settings, "region", nothing)
+    region === nothing || haskey(AWS_CONFIGS, "region") || Figgy.load!(AWS_CONFIGS, "region" => region)
+    return awsStaticCredentials(settings)
 end
 
 alternateConfigFileLocations() = Figgy.kmap(Figgy.EnvironmentVariables(),
@@ -127,6 +172,11 @@ awsProgramArguments() = Figgy.kmap(Figgy.ProgramArguments(),
     "region" => "region"; select=true
 )
 
+# Metadata endpoints: no proxy or redirects. Instance metadata also gets a short connect
+# timeout and no retries, as in the AWS SDKs.
+const METADATA_KW = (proxy=nothing, redirect=false)
+const IMDS_KW = (METADATA_KW..., connect_timeout=1, request_timeout=5, retry=false)
+
 # from within an ECS container, there's a specific endpoint setup to retrieve credentials
 struct ECSCredentialsSource <: Figgy.FigSource
     ecsHost::String # for testing purposes
@@ -134,17 +184,12 @@ end
 ECSCredentialsSource() = ECSCredentialsSource("http://169.254.170.2")
 
 function Figgy.load(x::ECSCredentialsSource)
-    host = x.ecsHost
-    # check if we have necessary config to fetch ECS creds
-    Figgy.load!(AWS_CONFIGS, Figgy.kmap(Figgy.EnvironmentVariables(),
-        "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI" => "container_credentials_relative_uri"; select=true
-    ))
-    url = get(AWS_CONFIGS, "container_credentials_relative_uri", "")
+    url = get(ENV, "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI", "")
     isempty(url) && return ()
     try
         # RoleArn identifies the role for these already-vended credentials. It is not
         # a request to assume the role again through STS.
-        return Figgy.kmap(Figgy.JsonObject(HTTP.get("$host$url").body),
+        return Figgy.kmap(Figgy.JsonObject(HTTP.get("$(x.ecsHost)$url"; METADATA_KW...).body),
             "AccessKeyId" => "aws_access_key_id",
             "SecretAccessKey" => "aws_secret_access_key",
             "Token" => "aws_session_token",
@@ -157,7 +202,6 @@ end
 reloadECSCredentials!(ecsHost=nothing) = Figgy.load!(AWS_CONFIGS, ECSCredentialsSource(ecsHost))
 
 # similar to ECS, EC2 instances can be configured to have credentials provided automatically
-# note that in awsLoadConfig, ECS takes precedence over EC2 as AWS dictates the precedence
 struct EC2CredentialsSource <: Figgy.FigSource
     ec2Host::String # for testing purposes
     port::Int # for testing purposes
@@ -165,23 +209,28 @@ end
 EC2CredentialsSource() = EC2CredentialsSource("169.254.169.254", 80)
 
 function Figgy.load(x::EC2CredentialsSource)
-    host = x.ec2Host
-    port = x.port
-    # check if we have necessary config to fetch EC2 creds
-    # https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/identify_ec2_instances.html
-    canconnect(host, port) || return ()
+    base = "http://$(x.ec2Host):$(x.port)/latest"
+    # IMDSv2 session token. Instances that allow IMDSv1 also answer without one.
+    headers = try
+        resp = HTTP.put("$base/api/token", ["X-aws-ec2-metadata-token-ttl-seconds" => "21600"]; status_exception=false, IMDS_KW...)
+        resp.status == 200 ? ["X-aws-ec2-metadata-token" => String(resp.body)] : Pair{String,String}[]
+    catch err
+        err isa InterruptException && rethrow()
+        Pair{String,String}[]
+    end
     try
-        role = String(HTTP.get("http://$host:$port/latest/meta-data/iam/security-credentials/").body)
-        region = String(HTTP.get("http://$host:$port/latest/meta-data/placement/region").body)
-        Figgy.load!(AWS_CONFIGS, "region" => region)
+        imds(path) = String(HTTP.get("$base/meta-data/$path", headers; IMDS_KW...).body)
+        role = strip(imds("iam/security-credentials/"))
+        region = imds("placement/region")
         # The metadata service has already assumed the instance role and returned its
         # temporary credentials. Do not treat response metadata as role configuration.
-        return Figgy.kmap(Figgy.JsonObject(HTTP.get("http://$host:$port/latest/meta-data/iam/security-credentials/$role").body),
+        creds = Figgy.kmap(Figgy.JsonObject(imds("iam/security-credentials/$role")),
             "AccessKeyId" => "aws_access_key_id",
             "SecretAccessKey" => "aws_secret_access_key",
             "Token" => "aws_session_token",
             "Expiration" => "expiration",
         )
+        return push!(collect(Pair{String,Any}, creds), "region" => region)
     catch
         return ()
     end
@@ -192,61 +241,62 @@ reloadEC2Credentials!(ecsHost="169.254.169.254", port=80) = Figgy.load!(AWS_CONF
 # is read from a file, neither of which fits a Dict{String,String}
 sts_params(roleArn) = Dict{String,Any}("RoleArn" => roleArn)
 
-function loadRoleArn(roleArn, credFile, configFile)
-    # with role_arn, we're going to call STS for temporary creds
-    # so we need to figure out where our source creds come from
-    # Dict{String,Any}: STS parameters below include non-String values (DurationSeconds is
-    # an Int, WebIdentityToken is read from a file), which a Dict{String,String} cannot hold
-    params = sts_params(roleArn)
-    if haskey(AWS_CONFIGS, "role_session_name")
-        params["RoleSessionName"] = AWS_CONFIGS["role_session_name"]
+stsURL() = get(ENV, "AWS_ENDPOINT_URL_STS", "https://sts.amazonaws.com/")
+
+function awsProfileCredentials(settings, credFile, configFile)
+    haskey(settings, "role_arn") || return awsStaticCredentials(settings)
+    source = if haskey(settings, "source_profile")
+        awsStaticCredentials(awsProfileSettings(settings["source_profile"], credFile, configFile))
+    elseif haskey(settings, "credential_source")
+        awsCredentialSource(settings["credential_source"])
+    elseif haskey(settings, "web_identity_token_file")
+        return awsWebIdentity(settings)
     else
-        params["RoleSessionName"] = "CloudBase.jl-RSN-$(Dates.format(now(UTC), ISO8601))-$(time_ns())"
+        throw(ArgumentError("AWS profile with role_arn needs source_profile, credential_source, or web_identity_token_file"))
     end
-    sprofile = get(AWS_CONFIGS, "source_profile", "")
-    params["Action"] = "AssumeRole"
-    params["Version"] = "2011-06-15"
-    credentials = if sprofile != ""
-        # source_profile is the config file profile we should use for creds to call STS
-        Figgy.load!(AWS_CONFIGS, Figgy.IniFile(credFile, sprofile), Figgy.IniFile(configFile, sprofile))
-        AWSCredentials(
-            get(AWS_CONFIGS, "aws_access_key_id", ""),
-            get(AWS_CONFIGS, "aws_secret_access_key", ""),
-            get(AWS_CONFIGS, "aws_session_token", "")
-        )
-    elseif haskey(AWS_CONFIGS, "credential_source")
-        # if credential_source is provided, we've already loaded source creds
-        # above via environment variables, ecs, or ec2, so we should be ready to call STS
-        AWSCredentials(
-            get(AWS_CONFIGS, "aws_access_key_id", ""),
-            get(AWS_CONFIGS, "aws_secret_access_key", ""),
-            get(AWS_CONFIGS, "aws_session_token", "")
-        )
-    elseif haskey(AWS_CONFIGS, "web_identity_token_file")
-        # load the web identity token to be passed to STS
-        # the token is sent as a request parameter, so it must be text, not raw bytes
-        params["WebIdentityToken"] = strip(read(AWS_CONFIGS["web_identity_token_file"], String))
-        params["Action"] = "AssumeRoleWithWebIdentity"
-        nothing
+    source === nothing && throw(ArgumentError("no source credentials for AWS role $(settings["role_arn"])"))
+    params = awsRoleParams(settings)
+    haskey(settings, "external_id") && (params["ExternalId"] = settings["external_id"])
+    #TODO: support mfa_serial by prompting user for OTP: https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-role.html#cli-configure-role-mfa
+    return awsAssumeRole("AssumeRole", params,
+        AWSCredentials(source.access_key_id, source.secret_access_key, source.session_token))
+end
+
+function awsCredentialSource(name)
+    name == "Environment" && return awsStaticCredentials(Dict{String,String}(awsConfigEnvironmentVariables()))
+    name == "EcsContainer" && return awsSourceCredentials(ECSCredentialsSource())
+    name == "Ec2InstanceMetadata" && return awsSourceCredentials(EC2CredentialsSource())
+    throw(ArgumentError("unsupported AWS credential_source `$name`"))
+end
+
+function awsRoleParams(settings)
+    params = sts_params(settings["role_arn"])
+    params["RoleSessionName"] = get(settings, "role_session_name") do
+        "CloudBase.jl-RSN-$(Dates.format(now(UTC), ISO8601))-$(time_ns())"
     end
-    if haskey(AWS_CONFIGS, "duration_seconds")
-        dur = parse(Int, AWS_CONFIGS["duration_seconds"])
+    if haskey(settings, "duration_seconds")
+        dur = parse(Int, settings["duration_seconds"])
         (900 <= dur <= 43200) || throw(ArgumentError("invalid duration_seconds configuration, must be 900 <= duration_seconds <= 43200: $dur"))
         params["DurationSeconds"] = dur
     end
-    if haskey(AWS_CONFIGS, "external_id")
-        params["ExternalId"] = AWS_CONFIGS["external_id"]
-    end
-    #TODO: support mfa_serial by prompting user for OTP: https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-role.html#cli-configure-role-mfa
-    #TODO: support region-specific STS?
-    resp = AWS.post("https://sts.amazonaws.com/", [], params; credentials)
-    # parse xml results, load into AWS_CONFIGS
-    Figgy.load!(AWS_CONFIGS, Figgy.kmap(Figgy.XmlObject(resp.body, "AssumeRoleResult.Credentials"),
-        "AccessKeyId" => "aws_access_key_id",
-        "SecretAccessKey" => "aws_secret_access_key",
-        "SessionToken" => "aws_session_token",
-        "Expiration" => "expiration",
-    ))
+    return params
+end
+
+function awsWebIdentity(settings)
+    params = awsRoleParams(settings)
+    # the token is sent as a request parameter, so it must be text, not raw bytes
+    params["WebIdentityToken"] = strip(read(settings["web_identity_token_file"], String))
+    return awsAssumeRole("AssumeRoleWithWebIdentity", params, nothing)
+end
+
+function awsAssumeRole(action, params, credentials)
+    params["Action"] = action
+    params["Version"] = "2011-06-15"
+    # The global endpoint signs for us-east-1; a regional STS host signs for its own region.
+    resp = AWS.post(stsURL(), [], params; credentials, service="sts", region=AWS_DEFAULT_REGION)
+    creds = Figgy.XmlObject(resp.body, "$(action)Result.Credentials").figs
+    return (access_key_id=String(creds["AccessKeyId"]), secret_access_key=String(creds["SecretAccessKey"]),
+        session_token=String(creds["SessionToken"]), expiration=DateTime(rstrip(creds["Expiration"], 'Z')))
 end
 
 const AWS_DEFAULT_REGION = "us-east-1"
