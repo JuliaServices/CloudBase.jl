@@ -305,6 +305,25 @@ end
     end
 end
 
+@testset "Azure configured credentials" begin
+    environment = [k => nothing for k in keys(ENV) if startswith(k, "AZURE_") || k == "SAS_TOKEN"]
+    mktempdir() do home
+        # Configured keys are used without asking a VM's managed identity (none exists here).
+        withenv(environment..., "HOME" => home, "AZURE_STORAGE_ACCOUNT" => "account", "AZURE_STORAGE_KEY" => "a2V5") do
+            @test Azure.Credentials().auth === CloudBase.SharedKey("account", "a2V5")
+        end
+        # A reload that fails keeps the current token until it expires.
+        mkpath(joinpath(home, ".azure"))
+        write(joinpath(home, ".azure", "config"), "[storage]\nsas_token = sv=2020-12-06&sig=abc\nexpiration = not-a-date\n")
+        withenv(environment..., "HOME" => home) do
+            creds = Azure.Credentials(CloudBase.AccessToken("current"), Dates.now(Dates.UTC) + Dates.Minute(2))
+            @test CloudBase.getCredentials(creds).token == "current"
+            creds.expiration = Dates.now(Dates.UTC) - Dates.Second(1)
+            @test_throws ArgumentError CloudBase.getCredentials(creds)
+        end
+    end
+end
+
 @testset "GCP Access Token" begin
     creds = GCP.Credentials("TEST_TOKEN")
     req = HTTP.Request("GET", "/test")

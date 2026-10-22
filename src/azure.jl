@@ -36,20 +36,25 @@ AzureCredentials(auth::AzureAuth, expiration=nothing, expireThreshold=Dates.Minu
 AzureCredentials(account::String, key::String; kw...) = AzureCredentials(SharedKey(account, key); kw...)
 AzureCredentials(token::String; kw...) = AzureCredentials(contains(token, "&") ? SASToken(token) : AccessToken(token); kw...)
 
+# Return the auth, reloading a token that expires within `expireThreshold`. If the reload
+# fails, an unexpired token stays in use and the next call tries again.
 function getCredentials(x::AzureCredentials)
     Base.@lock x.lock begin
         if expired(x)
-            azureLoadConfig!(x.expireThreshold)
-            creds = AZURE_CONFIGS["credentials"]
-            x.auth = creds.auth
-            x.expiration = creds.expiration
+            try
+                creds = azureLoadConfig!(x.expireThreshold)
+                x.auth = creds.auth
+                x.expiration = creds.expiration
+            catch err
+                (err isa InterruptException || Dates.now(Dates.UTC) >= x.expiration) && rethrow()
+            end
         end
         return x.auth
     end
 end
 
 function AzureCredentials(load::Bool=true; expireThreshold=Dates.Minute(5))
-    load && azureLoadConfig!(expireThreshold)
+    load && return azureLoadConfig!(expireThreshold)
     return AZURE_CONFIGS["credentials"]
 end
 
@@ -87,42 +92,42 @@ function azureExpiration(x::AbstractString)
     return dt
 end
 
+# Each load rewrites the shared store, so loads run one at a time.
+const AZURE_LOAD_LOCK = ReentrantLock()
+
+# Credentials from the environment or `~/.azure/config`, else the VM's managed identity.
+# The VM is queried only when no SAS token, access token, or account key is configured.
 function azureLoadConfig!(expireThreshold=Dates.Minute(5))
-    # on each fresh load, we want to clear out potentially stale credential fields
-    # note that each load, we *will* replace AZURE_CONFIGS["credentials"]
-    # so we still keep track of their history bundled together
-    delete!(AZURE_CONFIGS, "sas_token")
-    delete!(AZURE_CONFIGS, "access_token")
-    delete!(AZURE_CONFIGS, "account")
-    delete!(AZURE_CONFIGS, "key")
-    delete!(AZURE_CONFIGS, "expiration")
-    Figgy.load!(AZURE_CONFIGS, azureVMConfig())
-    configFile = joinpath(homedir(), ".azure", "config")
-    Figgy.load!(AZURE_CONFIGS,
-        azureConfigEnvironmentVariables(),
-        Figgy.IniFile(configFile, "defaults"),
-        Figgy.IniFile(configFile, "storage"),
-        AzureVMCredentialsSource(),
-        #TODO: support oauth w/ client id/client secret
-        # https://docs.microsoft.com/en-us/azure/active-directory/develop/scenario-daemon-acquire-token?tabs=dotnet
-    )
-    # after doing a single config "load", we want to bundle the credentials
-    # together as one object in AZURE_CONFIGS, so we know they all came "together"
-    # IMDS returns expires_on as a JSON string, and Figgy parses JSON scalars as
-    # Strings, so unix2datetime must not be handed the raw value
-    exp = get(AZURE_CONFIGS, "expiration", "")
-    expiration = azureExpiration(exp)
-    if haskey(AZURE_CONFIGS, "sas_token")
-        auth = SASToken(AZURE_CONFIGS["sas_token"])
-    elseif haskey(AZURE_CONFIGS, "access_token")
-        auth = AccessToken(AZURE_CONFIGS["access_token"])
-    elseif haskey(AZURE_CONFIGS, "account") && haskey(AZURE_CONFIGS, "key")
-        auth = SharedKey(AZURE_CONFIGS["account"], AZURE_CONFIGS["key"])
-    else
-        auth = SharedKey("", "")
+    Base.@lock AZURE_LOAD_LOCK begin
+        foreach(key -> delete!(AZURE_CONFIGS, key), ("sas_token", "access_token", "account", "key", "expiration"))
+        Figgy.load!(AZURE_CONFIGS, azureVMConfig())
+        configFile = joinpath(homedir(), ".azure", "config")
+        Figgy.load!(AZURE_CONFIGS,
+            azureConfigEnvironmentVariables(),
+            Figgy.IniFile(configFile, "defaults"),
+            Figgy.IniFile(configFile, "storage"),
+            #TODO: support oauth w/ client id/client secret
+            # https://docs.microsoft.com/en-us/azure/active-directory/develop/scenario-daemon-acquire-token?tabs=dotnet
+        )
+        configured = haskey(AZURE_CONFIGS, "sas_token") || haskey(AZURE_CONFIGS, "access_token") ||
+            (haskey(AZURE_CONFIGS, "account") && haskey(AZURE_CONFIGS, "key"))
+        configured || Figgy.load!(AZURE_CONFIGS, AzureVMCredentialsSource())
+        # IMDS returns expires_on as a JSON string, and Figgy parses JSON scalars as
+        # Strings, so unix2datetime must not be handed the raw value
+        expiration = azureExpiration(get(AZURE_CONFIGS, "expiration", ""))
+        if haskey(AZURE_CONFIGS, "sas_token")
+            auth = SASToken(AZURE_CONFIGS["sas_token"])
+        elseif haskey(AZURE_CONFIGS, "access_token")
+            auth = AccessToken(AZURE_CONFIGS["access_token"])
+        elseif haskey(AZURE_CONFIGS, "account") && haskey(AZURE_CONFIGS, "key")
+            auth = SharedKey(AZURE_CONFIGS["account"], AZURE_CONFIGS["key"])
+        else
+            auth = SharedKey("", "")
+        end
+        credentials = AzureCredentials(auth, expiration, expireThreshold)
+        Figgy.load!(AZURE_CONFIGS, "credentials" => credentials)
+        return credentials
     end
-    Figgy.load!(AZURE_CONFIGS, "credentials" => AzureCredentials(auth, expiration, expireThreshold))
-    return
 end
 
 struct AzureVMCredentialsSource <: Figgy.FigSource
@@ -140,7 +145,9 @@ function Figgy.load(x::AzureVMCredentialsSource)
         "mi_res_id" => get(AZURE_CONFIGS, "mi_res_id", ""),
     )
     filtered_query = Pair{String, String}[k => v for (k, v) in query if v != ""]
-    resp = HTTP.get("$host/metadata/identity/oauth2/token", ["Metadata" => "true"]; query=filtered_query)
+    # Link-local IMDS: never through a proxy or redirect; fail fast off Azure.
+    resp = HTTP.get("$host/metadata/identity/oauth2/token", ["Metadata" => "true"]; query=filtered_query,
+        proxy=nothing, redirect=false, connect_timeout=1)
     return Figgy.kmap(Figgy.JsonObject(resp.body),
         "access_token" => "access_token",
         "expires_on" => "expiration",
