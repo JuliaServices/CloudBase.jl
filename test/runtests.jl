@@ -712,8 +712,18 @@ end
 
 @testset "GCP Metadata" begin
     request_ref = Ref{Any}()
-    GCPMetadata.with(; request_ref=request_ref) do request_count
-        creds = CloudBase.reloadGCECredentials!("http://127.0.0.1:50400")
+    request_count = Ref(0)
+    # an OS-assigned port: a fixed one collides with other listeners on CI runners
+    server = HTTP.serve!("127.0.0.1", 0) do req
+        startswith(req.target, "/computeMetadata/v1/instance/service-accounts/") && endswith(req.target, "/token") ||
+            return HTTP.Response(404)
+        HTTP.header(req, "Metadata-Flavor") == "Google" || return HTTP.Response(400)
+        request_count[] += 1
+        request_ref[] = (method=req.method, target=req.target)
+        return HTTP.Response(200, GCPMetadata.RESP)
+    end
+    try
+        creds = CloudBase.reloadGCECredentials!("http://127.0.0.1:$(HTTP.port(server))")
         @test creds.auth isa CloudBase.GCPAccessToken
         @test creds.auth.token == "GCP_METADATA_TOKEN"
         @test request_count[] == 1
@@ -727,6 +737,8 @@ end
             end
         end
         @test request_count[] == 2
+    finally
+        close(server)
     end
 end
 
