@@ -309,8 +309,12 @@ end
     environment = [k => nothing for k in keys(ENV) if startswith(k, "AZURE_") || k == "SAS_TOKEN"]
     mktempdir() do home
         # Configured keys are used without asking a VM's managed identity (none exists here).
-        withenv(environment..., "HOME" => home, "AZURE_STORAGE_ACCOUNT" => "account", "AZURE_STORAGE_KEY" => "a2V5") do
+        withenv(environment..., "HOME" => home, "AZURE_STORAGE_ACCOUNT" => "account", "AZURE_STORAGE_KEY" => "a2V5",
+                "AZURE_CLIENT_SECRET" => "client-secret") do
             @test Azure.Credentials().auth === CloudBase.SharedKey("account", "a2V5")
+            # The shared config store keeps no secrets once the credentials are built.
+            shown = sprint(show, MIME"text/plain"(), CloudBase.AZURE_CONFIGS)
+            @test !occursin("a2V5", shown) && !occursin("client-secret", shown)
         end
         # A reload that fails keeps the current token until it expires.
         mkpath(joinpath(home, ".azure"))

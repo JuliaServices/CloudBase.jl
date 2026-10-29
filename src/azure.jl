@@ -114,20 +114,26 @@ function azureLoadConfig!(expireThreshold=Dates.Minute(5))
         )
         configured = haskey(AZURE_CONFIGS, "sas_token") || haskey(AZURE_CONFIGS, "access_token") ||
             (haskey(AZURE_CONFIGS, "account") && haskey(AZURE_CONFIGS, "key"))
-        configured || Figgy.load!(AZURE_CONFIGS, AzureVMCredentialsSource())
-        # IMDS returns expires_on as a JSON string, and Figgy parses JSON scalars as
-        # Strings, so unix2datetime must not be handed the raw value
-        expiration = azureExpiration(get(AZURE_CONFIGS, "expiration", ""))
-        if haskey(AZURE_CONFIGS, "sas_token")
-            auth = SASToken(AZURE_CONFIGS["sas_token"])
-        elseif haskey(AZURE_CONFIGS, "access_token")
-            auth = AccessToken(AZURE_CONFIGS["access_token"])
-        elseif haskey(AZURE_CONFIGS, "account") && haskey(AZURE_CONFIGS, "key")
-            auth = SharedKey(AZURE_CONFIGS["account"], AZURE_CONFIGS["key"])
-        else
-            auth = SharedKey("", "")
+        credentials = try
+            configured || Figgy.load!(AZURE_CONFIGS, AzureVMCredentialsSource())
+            # IMDS returns expires_on as a JSON string, and Figgy parses JSON scalars as
+            # Strings, so unix2datetime must not be handed the raw value
+            expiration = azureExpiration(get(AZURE_CONFIGS, "expiration", ""))
+            if haskey(AZURE_CONFIGS, "sas_token")
+                auth = SASToken(AZURE_CONFIGS["sas_token"])
+            elseif haskey(AZURE_CONFIGS, "access_token")
+                auth = AccessToken(AZURE_CONFIGS["access_token"])
+            elseif haskey(AZURE_CONFIGS, "account") && haskey(AZURE_CONFIGS, "key")
+                auth = SharedKey(AZURE_CONFIGS["account"], AZURE_CONFIGS["key"])
+            else
+                auth = SharedKey("", "")
+            end
+            AzureCredentials(auth, expiration, expireThreshold)
+        finally
+            # The credentials hold the secret they use (and print it masked); the shared
+            # store keeps none, so printing it shows no key or token.
+            foreach(key -> delete!(AZURE_CONFIGS, key), ("sas_token", "access_token", "key", "client_secret"))
         end
-        credentials = AzureCredentials(auth, expiration, expireThreshold)
         Figgy.load!(AZURE_CONFIGS, "credentials" => credentials)
         return credentials
     end
