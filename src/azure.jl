@@ -24,7 +24,7 @@ end
 Base.show(io::IO, ::SASToken) = print(io, "SASToken(****)")
 
 mutable struct AzureCredentials <: CloudCredentials
-    lock::ReentrantLock
+    lock::ReloadLock
     auth::AzureAuth
     expiration::Union{Nothing, DateTime}
     expireThreshold::Dates.Period
@@ -36,15 +36,18 @@ AzureCredentials(auth::AzureAuth, expiration=nothing, expireThreshold=Dates.Minu
 AzureCredentials(account::String, key::String; kw...) = AzureCredentials(SharedKey(account, key); kw...)
 AzureCredentials(token::String; kw...) = AzureCredentials(contains(token, "&") ? SASToken(token) : AccessToken(token); kw...)
 
-# Return the auth, reloading a token that expires within `expireThreshold`. If the reload
-# fails, an unexpired token stays in use and the next call tries again.
+# Return the auth, reloading a token that expires within `expireThreshold`. Concurrent
+# callers share one reload. If it fails, an unexpired token stays in use and the next call
+# tries again; an expired one raises its error.
 function getCredentials(x::AzureCredentials)
-    Base.@lock x.lock begin
+    return withreloadlock(x.lock) do fresh
         if expired(x)
             try
-                creds = azureLoadConfig!(x.expireThreshold)
-                x.auth = creds.auth
-                x.expiration = creds.expiration
+                reload!(x.lock, fresh) do
+                    creds = azureLoadConfig!(x.expireThreshold)
+                    x.auth = creds.auth
+                    x.expiration = creds.expiration
+                end
             catch err
                 (err isa InterruptException || Dates.now(Dates.UTC) >= x.expiration) && rethrow()
             end

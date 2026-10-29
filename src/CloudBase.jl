@@ -29,6 +29,50 @@ _some(x, y) = x === nothing ? y : x
 # expiration check for credential types that support refreshing
 expired(x) = x.expiration !== nothing && Dates.now(Dates.UTC) > (x.expiration - x.expireThreshold)
 
+# The lock of one credentials object, which serializes its reloads. Callers that wait for
+# it while another caller's reload runs share that attempt instead of each trying again.
+mutable struct ReloadLock <: Base.AbstractLock
+    lock::ReentrantLock
+    @atomic attempts::Int
+    error::Union{Nothing,Exception}
+end
+
+ReloadLock(lock::ReentrantLock=ReentrantLock()) = ReloadLock(lock, 0, nothing)
+# Credentials constructed with a `ReentrantLock` get a `ReloadLock` around it.
+Base.convert(::Type{ReloadLock}, lock::ReentrantLock) = ReloadLock(lock)
+Base.lock(l::ReloadLock) = lock(l.lock)
+Base.unlock(l::ReloadLock) = unlock(l.lock)
+Base.trylock(l::ReloadLock) = trylock(l.lock)
+Base.islocked(l::ReloadLock) = islocked(l.lock)
+
+# Lock `l` and return `f(fresh)`, where `fresh` is false if a reload finished while this
+# caller waited for the lock.
+function withreloadlock(f, l::ReloadLock)
+    seen = @atomic l.attempts
+    return lock(() -> f(seen == @atomic l.attempts), l)
+end
+
+# With `l` locked: run the reload `f` and record its outcome or, when not `fresh`, share
+# the outcome of the reload that just finished by rethrowing its error.
+function reload!(f, l::ReloadLock, fresh::Bool)
+    if !fresh
+        l.error === nothing || throw(l.error)
+        return nothing
+    end
+    try
+        f()
+    catch err
+        # An interrupted reload has no outcome to share; waiters try again.
+        err isa InterruptException && rethrow()
+        l.error = err
+        @atomic l.attempts += 1
+        rethrow()
+    end
+    l.error = nothing
+    @atomic l.attempts += 1
+    return nothing
+end
+
 
 # HTTP 2 request bodies are typed objects rather than raw bytes, and `HTTP.isbytes`
 # no longer exists. Signing needs the payload bytes for its SHA-256/HMAC.

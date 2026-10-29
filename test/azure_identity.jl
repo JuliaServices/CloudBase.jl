@@ -54,6 +54,29 @@ using Test, Dates, CloudBase, HTTP, JSON, Sockets
         tasks = [errormonitor(Threads.@spawn CloudBase.getCredentials(credentials; request=concurrent_request).token) for _ in 1:20]
         @test all(==("concurrent-token"), fetch.(tasks))
         @test concurrent_calls[] == 1
+        # Concurrent callers share one failed request and all raise its error.
+        credentials.expiration = now(UTC)
+        failed_calls = Ref(0)
+        failing_request = function(args...; kw...)
+            failed_calls[] += 1
+            throw(CloudBase.AzureIdentityError("exchange rejected"))
+        end
+        ready = Channel{Nothing}(Inf)
+        tasks = lock(credentials.lock) do
+            tasks = [errormonitor(Threads.@spawn begin
+                put!(ready, nothing)
+                try
+                    CloudBase.getCredentials(credentials; request=failing_request)
+                catch err
+                    err
+                end
+            end) for _ in 1:20]
+            foreach(_ -> take!(ready), 1:20)
+            sleep(0.1)
+            tasks
+        end
+        @test all(err -> err isa CloudBase.AzureIdentityError, fetch.(tasks))
+        @test failed_calls[] == 1
         credentials.expiration = now(UTC)
         failure = (args...; kw...) -> throw(CloudBase.AzureIdentityError("exchange rejected"))
         @test_throws CloudBase.AzureIdentityError CloudBase.getCredentials(credentials; request=failure)

@@ -104,6 +104,41 @@ using Test, Dates, CloudBase, HTTP, JSON, URIs
                 take!(sts_calls)
             end
 
+            # Concurrent callers share one failed reload: STS gets one request, expired
+            # credentials raise its error, and unexpired ones stay in use.
+            sts_status[] = 500
+            for (expiration, raises) in ((Dates.now(Dates.UTC) - Dates.Second(1), true),
+                                         (Dates.now(Dates.UTC) + Dates.Minute(2), false))
+                role.expiration = expiration
+                ready = Channel{Nothing}(Inf)
+                # Every caller waits for the lock before the first reload starts.
+                tasks = lock(role.lock) do
+                    tasks = [errormonitor(Threads.@spawn begin
+                        put!(ready, nothing)
+                        try
+                            CloudBase.getCredentials(role)
+                            false
+                        catch err
+                            err isa HTTP.StatusError
+                        end
+                    end) for _ in 1:40]
+                    foreach(_ -> take!(ready), 1:40)
+                    sleep(0.1)
+                    tasks
+                end
+                @test all(==(raises), fetch.(tasks))
+                calls = 0
+                while isready(sts_calls)
+                    take!(sts_calls)
+                    calls += 1
+                end
+                @test calls == 1
+            end
+            sts_status[] = 200
+            role.expiration = Dates.now(Dates.UTC) - Dates.Second(1)
+            @test CloudBase.getCredentials(role).access_key_id == "AssumeRole_KEY"
+            take!(sts_calls)
+
             # Concurrent loads of different profiles never mix their results.
             tasks = [errormonitor(Threads.@spawn CloudBase.AWSCredentials(isodd(i) ? "dev" : "cfgonly").access_key_id) for i in 1:20]
             @test [fetch(t) for t in tasks] == [isodd(i) ? "DEV_KEY" : "CFG_KEY" for i in 1:20]

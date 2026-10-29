@@ -17,7 +17,7 @@ struct AzureManagedIdentity
 end
 
 mutable struct AzureIdentityCredentials{S} <: CloudCredentials
-    lock::ReentrantLock
+    lock::ReloadLock
     source::S
     resource::String
     auth::AccessToken
@@ -150,14 +150,17 @@ function azureIdentityToken(source::AzureManagedIdentity, resource; request=azur
     return azureIdentityToken(payload), expiration
 end
 
+# Concurrent callers share one token request; if it fails, they all raise its error.
 function getCredentials(credentials::AzureIdentityCredentials; request=azureIdentityRequest)
-    Base.@lock credentials.lock begin
+    return withreloadlock(credentials.lock) do fresh
         if credentials.expiration === nothing || Dates.now(Dates.UTC) >= credentials.expiration - credentials.expireThreshold
-            auth, expiration = azureIdentityToken(credentials.source, credentials.resource; request)
-            expiration > Dates.now(Dates.UTC) + credentials.expireThreshold ||
-                throw(AzureIdentityError("Azure identity token expires before the refresh margin"))
-            credentials.auth = auth
-            credentials.expiration = expiration
+            reload!(credentials.lock, fresh) do
+                auth, expiration = azureIdentityToken(credentials.source, credentials.resource; request)
+                expiration > Dates.now(Dates.UTC) + credentials.expireThreshold ||
+                    throw(AzureIdentityError("Azure identity token expires before the refresh margin"))
+                credentials.auth = auth
+                credentials.expiration = expiration
+            end
         end
         return credentials.auth
     end
