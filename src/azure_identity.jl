@@ -36,8 +36,10 @@ function AzureIdentityCredentials(source, resource::AbstractString, expireThresh
         throw(ArgumentError("Azure resource must be an https:// or api:// URI"))
     threshold = convert(Dates.Millisecond, expireThreshold)
     threshold >= Dates.Millisecond(0) || throw(ArgumentError("expireThreshold must be nonnegative"))
-    return AzureIdentityCredentials(ReentrantLock(), source, String(resource), AccessToken(""), nothing, threshold)
+    return AzureIdentityCredentials(ReloadLock(), source, String(resource), AccessToken(""), nothing, threshold)
 end
+
+AzureIdentityCredentials(lock::ReentrantLock, args...) = AzureIdentityCredentials(ReloadLock(lock), args...)
 
 function AzureWorkloadIdentityCredentials(; resource::AbstractString,
         tenant_id::AbstractString=get(ENV, "AZURE_TENANT_ID", ""),
