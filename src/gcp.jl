@@ -366,7 +366,8 @@ function refresh!(x::GCPCredentials, source::ExternalAccountSource)
 end
 
 function refresh!(x::GCPCredentials, source::MetadataSource)
-    resp = HTTP.get(metadataTokenURL(source), ["Metadata-Flavor" => "Google"]; GCP_METADATA_KW...)
+    # A metadata server that accepts but never answers must not hang every request.
+    resp = HTTP.get(metadataTokenURL(source), ["Metadata-Flavor" => "Google"]; request_timeout=30, GCP_METADATA_KW...)
     payload = JSON.parse(resp.body)
     x.auth = GCPAccessToken(String(jsonfield(payload, "access_token")))
     x.expiration = tokenExpiration(jsonfield(payload, "expires_in"))
