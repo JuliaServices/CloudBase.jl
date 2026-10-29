@@ -7,10 +7,11 @@ include("aws_credentials.jl")
 
 const x32bit = Sys.WORD_SIZE == 32
 
-# A port for a mock server. Fixed ports collide with other sockets on CI runners
-# ("bind: address already in use"), so tests pick an unused one instead.
+# An unused localhost port for a mock server. Fixed ports collide with other sockets on CI runners
+# ("bind: address already in use"). Starting below 32768 keeps clear of the Linux and macOS
+# ephemeral ranges, so no outgoing connection takes the port before the mock binds it.
 function freeport()
-    port, socket = Sockets.listenany(IPv4(0), rand(RandomDevice(), 10000:50000))
+    port, socket = Sockets.listenany(Sockets.localhost, rand(RandomDevice(), 10000:32000))
     close(socket)
     return Int(port)
 end
