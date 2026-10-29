@@ -117,7 +117,7 @@ end
 Base.show(io::IO, source::MetadataSource) = print(io, "MetadataSource($(source.root), $(source.service_account))")
 
 mutable struct GCPCredentials <: CloudCredentials
-    lock::ReentrantLock
+    lock::ReloadLock
     source::GCPSource
     auth::GCPAuth
     expiration::Union{Nothing, DateTime}
@@ -310,11 +310,10 @@ function loadMetadataCredentials(; root::String=GCP_DEFAULT_METADATA_ROOT, servi
     return credentials
 end
 
+# Concurrent callers share one refresh; if it fails, they all raise its error.
 function getCredentials(x::GCPCredentials)
-    Base.@lock x.lock begin
-        if shouldRefresh(x)
-            refresh!(x)
-        end
+    return withreloadlock(x.lock) do fresh
+        shouldRefresh(x) && reload!(() -> refresh!(x), x.lock, fresh)
         return x.auth
     end
 end

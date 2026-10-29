@@ -9,7 +9,7 @@ const AWS_PROFILE_KEYS = ("profile", "aws_config_file", "aws_shared_credentials_
     "role_session_name", "external_id", "duration_seconds")
 
 mutable struct AWSCredentials <: CloudCredentials
-    lock::ReentrantLock
+    lock::ReloadLock
     profile::String # profile to reload; "" reloads the default chain
     access_key_id::String
     secret_access_key::String
@@ -37,24 +37,23 @@ AWSCredentials(access_key_id::String, secret_access_key::String, session_token::
     AWSCredentials("", access_key_id, secret_access_key, session_token, expiration, expireThreshold)
 
 # Return the credential fields, reloading credentials that expire within `expireThreshold`.
-# If a reload fails or finds nothing, unexpired credentials stay in use and the next call
-# tries again; expired ones raise.
+# Concurrent callers share one reload. If it fails or finds nothing, unexpired credentials
+# stay in use and the next call tries again; expired ones raise its error.
 function getCredentials(x::AWSCredentials)
-    Base.@lock x.lock begin
+    return withreloadlock(x.lock) do fresh
         if expired(x)
-            fresh = try
-                awsLoadConfig!(x.profile, x.expireThreshold)
+            try
+                reload!(x.lock, fresh) do
+                    creds = awsLoadConfig!(x.profile, x.expireThreshold)
+                    isempty(creds.access_key_id) &&
+                        error("AWS credentials expired at $(x.expiration) UTC and could not be reloaded")
+                    x.access_key_id = creds.access_key_id
+                    x.secret_access_key = creds.secret_access_key
+                    x.session_token = creds.session_token
+                    x.expiration = creds.expiration
+                end
             catch err
                 (err isa InterruptException || Dates.now(Dates.UTC) >= x.expiration) && rethrow()
-                nothing
-            end
-            if fresh !== nothing && !isempty(fresh.access_key_id)
-                x.access_key_id = fresh.access_key_id
-                x.secret_access_key = fresh.secret_access_key
-                x.session_token = fresh.session_token
-                x.expiration = fresh.expiration
-            elseif Dates.now(Dates.UTC) >= x.expiration
-                error("AWS credentials expired at $(x.expiration) UTC and could not be reloaded")
             end
         end
         return (access_key_id=x.access_key_id, secret_access_key=x.secret_access_key, session_token=x.session_token)

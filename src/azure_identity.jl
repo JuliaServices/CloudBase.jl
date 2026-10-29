@@ -17,7 +17,7 @@ struct AzureManagedIdentity
 end
 
 mutable struct AzureIdentityCredentials{S} <: CloudCredentials
-    lock::ReentrantLock
+    lock::ReloadLock
     source::S
     resource::String
     auth::AccessToken
@@ -36,8 +36,11 @@ function AzureIdentityCredentials(source, resource::AbstractString, expireThresh
         throw(ArgumentError("Azure resource must be an https:// or api:// URI"))
     threshold = convert(Dates.Millisecond, expireThreshold)
     threshold >= Dates.Millisecond(0) || throw(ArgumentError("expireThreshold must be nonnegative"))
-    return AzureIdentityCredentials(ReentrantLock(), source, String(resource), AccessToken(""), nothing, threshold)
+    return AzureIdentityCredentials(ReloadLock(), source, String(resource), AccessToken(""), nothing, threshold)
 end
+
+AzureIdentityCredentials(lock::ReentrantLock, source, resource, auth, expiration, expireThreshold) =
+    AzureIdentityCredentials(ReloadLock(lock), source, resource, auth, expiration, expireThreshold)
 
 function AzureWorkloadIdentityCredentials(; resource::AbstractString,
         tenant_id::AbstractString=get(ENV, "AZURE_TENANT_ID", ""),
@@ -150,14 +153,17 @@ function azureIdentityToken(source::AzureManagedIdentity, resource; request=azur
     return azureIdentityToken(payload), expiration
 end
 
+# Concurrent callers share one token request; if it fails, they all raise its error.
 function getCredentials(credentials::AzureIdentityCredentials; request=azureIdentityRequest)
-    Base.@lock credentials.lock begin
+    return withreloadlock(credentials.lock) do fresh
         if credentials.expiration === nothing || Dates.now(Dates.UTC) >= credentials.expiration - credentials.expireThreshold
-            auth, expiration = azureIdentityToken(credentials.source, credentials.resource; request)
-            expiration > Dates.now(Dates.UTC) + credentials.expireThreshold ||
-                throw(AzureIdentityError("Azure identity token expires before the refresh margin"))
-            credentials.auth = auth
-            credentials.expiration = expiration
+            reload!(credentials.lock, fresh) do
+                auth, expiration = azureIdentityToken(credentials.source, credentials.resource; request)
+                expiration > Dates.now(Dates.UTC) + credentials.expireThreshold ||
+                    throw(AzureIdentityError("Azure identity token expires before the refresh margin"))
+                credentials.auth = auth
+                credentials.expiration = expiration
+            end
         end
         return credentials.auth
     end

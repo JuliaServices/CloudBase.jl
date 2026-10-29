@@ -29,6 +29,52 @@ _some(x, y) = x === nothing ? y : x
 # expiration check for credential types that support refreshing
 expired(x) = x.expiration !== nothing && Dates.now(Dates.UTC) > (x.expiration - x.expireThreshold)
 
+# The lock of one credentials object, which serializes its reloads. Callers that wait for
+# it while another caller's reload runs share that attempt instead of each trying again.
+mutable struct ReloadLock <: Base.AbstractLock
+    lock::ReentrantLock
+    @atomic attempts::Int
+    error::Union{Nothing,Exception}
+end
+
+ReloadLock(lock::ReentrantLock=ReentrantLock()) = ReloadLock(lock, 0, nothing)
+# Credentials constructed with a `ReentrantLock` get a `ReloadLock` around it.
+Base.convert(::Type{ReloadLock}, lock::ReentrantLock) = ReloadLock(lock)
+Base.lock(l::ReloadLock) = lock(l.lock)
+Base.unlock(l::ReloadLock) = unlock(l.lock)
+Base.trylock(l::ReloadLock) = trylock(l.lock)
+Base.islocked(l::ReloadLock) = islocked(l.lock)
+# Credentials without a custom `show` print their lock; the last error stays out of it.
+Base.show(io::IO, ::ReloadLock) = print(io, "ReloadLock()")
+
+# Lock `l` and return `f(fresh)`, where `fresh` is false if a reload finished while this
+# caller waited for the lock.
+function withreloadlock(f, l::ReloadLock)
+    seen = @atomic l.attempts
+    return lock(() -> f(seen == @atomic l.attempts), l)
+end
+
+# With `l` locked: run the reload `f` and record its outcome or, when not `fresh`, share
+# the outcome of the reload that just finished by rethrowing its error.
+function reload!(f, l::ReloadLock, fresh::Bool)
+    if !fresh
+        l.error === nothing || throw(l.error)
+        return nothing
+    end
+    try
+        f()
+    catch err
+        # An interrupted reload has no outcome to share; waiters try again.
+        err isa InterruptException && rethrow()
+        l.error = err
+        @atomic l.attempts += 1
+        rethrow()
+    end
+    l.error = nothing
+    @atomic l.attempts += 1
+    return nothing
+end
+
 
 # HTTP 2 request bodies are typed objects rather than raw bytes, and `HTTP.isbytes`
 # no longer exists. Signing needs the payload bytes for its SHA-256/HMAC.
@@ -368,7 +414,8 @@ A profile with `role_arn` gets temporary credentials from STS using its `source_
 The 2nd constructor uses the given keys and ignores all configuration.
 
 Loaded credentials that expire are reloaded `expireThreshold` before expiration when a request is
-made. If a reload fails, the current credentials stay in use until they expire.
+made. If a reload fails, the current credentials stay in use until they expire. Requests made while
+a reload runs wait for it and use its result, including its error, instead of reloading again.
 """
 const Credentials = AWSCredentials
 
@@ -448,7 +495,8 @@ will search the normal Azure credential locations (files, environment variables,
 to find the account, shared key, or access_token. Otherwise, the 2nd constructor allows providing the
 account & shared key or access token directly, ignoring any existing configurations. Azure VM credentials
 are also automatically detected and retrieved. Temporary credentials via Azure VM that include expirations
-will automatically be refreshed `expireThreshold` before expiration when a request is made.
+will automatically be refreshed `expireThreshold` before expiration when a request is made. Requests made
+while a refresh runs wait for it and use its result, including its error, instead of refreshing again.
 """
 const Credentials = AzureCredentials
 
@@ -458,7 +506,8 @@ const Credentials = AzureCredentials
 Acquire audience-specific bearer tokens using AKS workload identity. Identity settings default to
 `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_FEDERATED_TOKEN_FILE`, and `AZURE_AUTHORITY_HOST`.
 Each refresh rereads the projected token file and verifies TLS. Tokens are cached per credential
-object with synchronized refresh. Missing settings or exchange failures raise without trying
+object; requests made while a refresh runs wait for it and share its result, including its error.
+Missing settings or exchange failures raise without trying
 storage keys, VM credentials, client secrets, or Azure CLI credentials. Acquisition is lazy.
 Pass an exact `https://` or `api://` resource URI; any trailing slash remains part of the audience.
 """
@@ -469,7 +518,8 @@ const WorkloadIdentityCredentials = AzureWorkloadIdentityCredentials
 
 Acquire audience-specific bearer tokens from Azure VM IMDS. `client_id` selects a user-assigned
 identity and defaults to `AZURE_CLIENT_ID`; an empty ID requests the system-assigned identity.
-Tokens are cached per credential object with synchronized refresh. IMDS requests bypass proxies
+Tokens are cached per credential object; requests made while a refresh runs wait for it and share
+its result, including its error. IMDS requests bypass proxies
 and redirects. This provider does not implement App Service's distinct identity endpoint protocol.
 Pass an exact `https://` or `api://` resource URI.
 Transient IMDS failures get up to five retries with exponential delays capped at 60 seconds.
