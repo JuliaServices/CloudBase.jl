@@ -148,9 +148,10 @@ function Figgy.load(x::AzureVMCredentialsSource)
         "mi_res_id" => get(AZURE_CONFIGS, "mi_res_id", ""),
     )
     filtered_query = Pair{String, String}[k => v for (k, v) in query if v != ""]
-    # Link-local IMDS: never through a proxy or redirect; fail fast off Azure.
+    # Link-local IMDS: never through a proxy or redirect; fail fast off Azure, and never
+    # wait forever on an endpoint that accepts but does not answer.
     resp = HTTP.get("$host/metadata/identity/oauth2/token", ["Metadata" => "true"]; query=filtered_query,
-        proxy=nothing, redirect=false, connect_timeout=1)
+        proxy=nothing, redirect=false, connect_timeout=1, request_timeout=30)
     return Figgy.kmap(Figgy.JsonObject(resp.body),
         "access_token" => "access_token",
         "expires_on" => "expiration",

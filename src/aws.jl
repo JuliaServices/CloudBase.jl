@@ -171,10 +171,11 @@ awsProgramArguments() = Figgy.kmap(Figgy.ProgramArguments(),
     "region" => "region"; select=true
 )
 
-# Metadata endpoints: no proxy or redirects. Instance metadata also gets a short connect
-# timeout and no retries, as in the AWS SDKs.
-const METADATA_KW = (proxy=nothing, redirect=false)
-const IMDS_KW = (METADATA_KW..., connect_timeout=1, request_timeout=5, retry=false)
+# Metadata endpoints: no proxy or redirects, and short timeouts, as in the AWS SDKs: an
+# endpoint that accepts a connection but never answers would otherwise hang every request
+# waiting for credentials. Instance metadata also gets no retries.
+const METADATA_KW = (proxy=nothing, redirect=false, connect_timeout=1, request_timeout=5)
+const IMDS_KW = (METADATA_KW..., retry=false)
 
 # from within an ECS container, there's a specific endpoint setup to retrieve credentials
 struct ECSCredentialsSource <: Figgy.FigSource

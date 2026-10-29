@@ -710,6 +710,42 @@ end
     @test !CloudBase.metadataAvailable(root)
 end
 
+@testset "Credential endpoints that never answer time out" begin
+    # Accept connections and never respond.
+    listener = Sockets.listen(Sockets.IPv4("127.0.0.1"), 0)
+    held = Sockets.TCPSocket[]
+    acceptor = @async while true
+        socket = try
+            Sockets.accept(listener)
+        catch
+            break
+        end
+        push!(held, socket)
+    end
+    host = "http://127.0.0.1:$(Sockets.getsockname(listener)[2])"
+    loads = (
+        () -> withenv(() -> CloudBase.Figgy.load(CloudBase.ECSCredentialsSource(host)),
+            "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI" => "/credentials"),
+        () -> CloudBase.Figgy.load(CloudBase.AzureVMCredentialsSource(host)),
+        () -> CloudBase.refresh!(CloudBase.GCPCredentials(CloudBase.MetadataSource(host, "default"))),
+    )
+    tasks = [@async(try; load(); catch err; err; end) for load in loads]
+    try
+        done = timedwait(() -> all(istaskdone, tasks), 120) == :ok
+        @test done
+        if done
+            ecs, azure, gcp = fetch.(tasks)
+            # The ECS source reports no credentials; the others raise.
+            @test isempty(ecs)
+            @test azure isa Exception && gcp isa Exception
+        end
+    finally
+        close(listener)
+        foreach(close, held)
+        wait(acceptor)
+    end
+end
+
 @testset "GCP Metadata" begin
     request_ref = Ref{Any}()
     request_count = Ref(0)
