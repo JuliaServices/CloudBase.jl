@@ -39,7 +39,8 @@ function AzureIdentityCredentials(source, resource::AbstractString, expireThresh
     return AzureIdentityCredentials(ReloadLock(), source, String(resource), AccessToken(""), nothing, threshold)
 end
 
-AzureIdentityCredentials(lock::ReentrantLock, args...) = AzureIdentityCredentials(ReloadLock(lock), args...)
+AzureIdentityCredentials(lock::ReentrantLock, source, resource, auth, expiration, expireThreshold) =
+    AzureIdentityCredentials(ReloadLock(lock), source, resource, auth, expiration, expireThreshold)
 
 function AzureWorkloadIdentityCredentials(; resource::AbstractString,
         tenant_id::AbstractString=get(ENV, "AZURE_TENANT_ID", ""),
