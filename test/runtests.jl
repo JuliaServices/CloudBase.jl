@@ -7,6 +7,14 @@ include("aws_credentials.jl")
 
 const x32bit = Sys.WORD_SIZE == 32
 
+# A port for a mock server. Fixed ports collide with other sockets on CI runners
+# ("bind: address already in use"), so tests pick an unused one instead.
+function freeport()
+    port, socket = Sockets.listenany(IPv4(0), rand(RandomDevice(), 10000:50000))
+    close(socket)
+    return Int(port)
+end
+
 function verifyRS256(private_key::String, message::String, signature::Vector{UInt8})
     key = OpenSSL.EvpPKey(private_key)
     ctx = OpenSSL.EvpDigestContext()
@@ -279,29 +287,58 @@ if !x32bit
 end
 end
 
+# The ECS, EC2 and AzureVM mocks below serve CloudBaseTest's responses on OS-assigned ports;
+# CloudBaseTest's own `with` helpers for them listen on fixed ports.
 @testset "AWS ECS Task" begin
-    ECS.with() do
-        delete!(CloudBase.AWS_CONFIGS, "role_arn")
-        CloudBase.reloadECSCredentials!("http://127.0.0.1")
-        @test get(CloudBase.AWS_CONFIGS, "aws_session_token", "") == "ECS_TOKEN"
-        @test !haskey(CloudBase.AWS_CONFIGS, "role_arn")
+    server = HTTP.serve!("127.0.0.1", 0) do req
+        req.method == "GET" && req.target == "/credentials" || return HTTP.Response(404)
+        return HTTP.Response(200, ECS.RESP)
+    end
+    try
+        withenv("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI" => ":$(HTTP.port(server))/credentials") do
+            delete!(CloudBase.AWS_CONFIGS, "role_arn")
+            CloudBase.reloadECSCredentials!("http://127.0.0.1")
+            @test get(CloudBase.AWS_CONFIGS, "aws_session_token", "") == "ECS_TOKEN"
+            @test !haskey(CloudBase.AWS_CONFIGS, "role_arn")
+        end
+    finally
+        close(server)
     end
 end
 
 @testset "AWS EC2" begin
-    EC2.with() do
+    server = HTTP.serve!("127.0.0.1", 0) do req
+        req.method == "GET" || return HTTP.Response(404)
+        req.target == "/latest/meta-data/iam/security-credentials/" && return HTTP.Response(200, "testRole")
+        req.target == "/latest/meta-data/iam/security-credentials/testRole" && return HTTP.Response(200, EC2.RESP)
+        req.target == "/latest/meta-data/placement/region" && return HTTP.Response(200, "us-west-1")
+        return HTTP.Response(404)
+    end
+    try
         delete!(CloudBase.AWS_CONFIGS, "role_arn")
-        CloudBase.reloadEC2Credentials!("127.0.0.1", 50397)
+        CloudBase.reloadEC2Credentials!("127.0.0.1", HTTP.port(server))
         @test get(CloudBase.AWS_CONFIGS, "aws_session_token", "") == "EC2_TOKEN"
         @test get(CloudBase.AWS_CONFIGS, "region", "") == "us-west-1"
         @test !haskey(CloudBase.AWS_CONFIGS, "role_arn")
+    finally
+        close(server)
     end
 end
 
 @testset "AzureVM" begin
-    AzureVM.with() do
-        CloudBase.reloadAzureVMCredentials!("http://127.0.0.1:50398")
+    server = HTTP.serve!("127.0.0.1", 0) do req
+        req.method == "GET" && startswith(req.target, "/metadata/identity/oauth2/token?") || return HTTP.Response(404)
+        params = Dict(URIs.queryparampairs(HTTP.URI(req.target)))
+        HTTP.header(req, "Metadata") == "true" &&
+            get(params, "api-version", "") == "2018-02-01" &&
+            get(params, "resource", "") == "https://storage.azure.com/" || return HTTP.Response(400)
+        return HTTP.Response(200, AzureVM.RESP)
+    end
+    try
+        CloudBase.reloadAzureVMCredentials!("http://127.0.0.1:$(HTTP.port(server))")
         @test !isempty(get(CloudBase.AZURE_CONFIGS, "access_token", ""))
+    finally
+        close(server)
     end
 end
 
@@ -466,7 +503,8 @@ end
 
 @testset "GCP Service Account" begin
     request_ref = Ref{Any}()
-    GCPTokenServer.with(; request_ref=request_ref) do request_count
+    port = freeport()
+    GCPTokenServer.with(; port, request_ref=request_ref) do request_count
         mktemp() do path, io
             private_key = sprint(write, OpenSSL.EvpPKey(OpenSSL.rsa_generate_key()))
             write(io, JSON.json(Dict(
@@ -474,7 +512,7 @@ end
                 "client_email" => "service-account@test.local",
                 "private_key" => private_key,
                 "private_key_id" => "test-key-id",
-                "token_uri" => "http://127.0.0.1:50399/token",
+                "token_uri" => "http://127.0.0.1:$port/token",
             )))
             close(io)
             ENV[CloudBase.GCP_APPLICATION_CREDENTIALS_ENV] = path
@@ -497,7 +535,7 @@ end
                 @test header["kid"] == "test-key-id"
                 @test payload["iss"] == "service-account@test.local"
                 @test payload["scope"] == join(CloudBase.GCP_DEFAULT_SCOPES, ' ')
-                @test payload["aud"] == "http://127.0.0.1:50399/token"
+                @test payload["aud"] == "http://127.0.0.1:$port/token"
                 @test Int(payload["exp"]) - Int(payload["iat"]) == 3600
                 @test verifyRS256(private_key, string(parts[1], '.', parts[2]), CloudBase.base64urldecode(parts[3]))
 
@@ -523,7 +561,8 @@ end
         "expires_in" => 3599,
         "token_type" => "Bearer",
     ))
-    GCPTokenServer.with(; port=50403, response, request_ref=request_ref) do request_count
+    port = freeport()
+    GCPTokenServer.with(; port, response, request_ref=request_ref) do request_count
         temp_home = mktempdir()
         adc_dir = joinpath(temp_home, ".config", "gcloud")
         mkpath(adc_dir)
@@ -533,7 +572,7 @@ end
             "client_secret" => "authorized-client-secret",
             "refresh_token" => "authorized-refresh-token",
             "quota_project_id" => "billing-project",
-            "token_uri" => "http://127.0.0.1:50403/token",
+            "token_uri" => "http://127.0.0.1:$port/token",
         ))
         old_home = get(ENV, "HOME", nothing)
         old_gac = get(ENV, CloudBase.GCP_APPLICATION_CREDENTIALS_ENV, nothing)
@@ -566,8 +605,10 @@ end
 @testset "GCP External Account File Source" begin
     sts_request_ref = Ref{Any}()
     impersonation_request_ref = Ref{Any}()
-    GCPSTS.with(; request_ref=sts_request_ref) do sts_request_count
-        GCPImpersonation.with(; request_ref=impersonation_request_ref) do impersonation_request_count
+    sts_port = freeport()
+    GCPSTS.with(; port=sts_port, request_ref=sts_request_ref) do sts_request_count
+        impersonation_port = freeport() # picked while the STS mock holds sts_port
+        GCPImpersonation.with(; port=impersonation_port, request_ref=impersonation_request_ref) do impersonation_request_count
             mktempdir() do dir
                 subject_token_file = joinpath(dir, "subject-token.json")
                 JSON.json(subject_token_file, Dict("id_token" => "FILE_SUBJECT_TOKEN"))
@@ -576,8 +617,8 @@ end
                     "type" => "external_account",
                     "audience" => "//iam.googleapis.com/projects/123/locations/global/workloadIdentityPools/pool/providers/provider",
                     "subject_token_type" => "urn:ietf:params:oauth:token-type:jwt",
-                    "token_url" => "http://127.0.0.1:50401/v1/token",
-                    "service_account_impersonation_url" => "http://127.0.0.1:50402/v1/projects/-/serviceAccounts/test@example.com:generateAccessToken",
+                    "token_url" => "http://127.0.0.1:$sts_port/v1/token",
+                    "service_account_impersonation_url" => "http://127.0.0.1:$impersonation_port/v1/projects/-/serviceAccounts/test@example.com:generateAccessToken",
                     "service_account_impersonation" => Dict("token_lifetime_seconds" => 1800),
                     "workforce_pool_user_project" => "external-billing-project",
                     "credential_source" => Dict(
@@ -619,7 +660,8 @@ end
 @testset "GCP External Account URL Source" begin
     sts_request_ref = Ref{Any}()
     source_request_ref = Ref{Any}()
-    GCPSTS.with(; port=50404, response=JSON.json(Dict(
+    sts_port = freeport()
+    GCPSTS.with(; port=sts_port, response=JSON.json(Dict(
         "access_token" => "GCP_URL_STS_TOKEN",
         "issued_token_type" => CloudBase.GCP_REQUESTED_TOKEN_TYPE,
         "token_type" => "Bearer",
@@ -637,7 +679,7 @@ end
                     "type" => "external_account",
                     "audience" => "//iam.googleapis.com/projects/123/locations/global/workloadIdentityPools/pool/providers/provider",
                     "subject_token_type" => "urn:ietf:params:oauth:token-type:jwt",
-                    "token_url" => "http://127.0.0.1:50404/v1/token",
+                    "token_url" => "http://127.0.0.1:$sts_port/v1/token",
                     "credential_source" => Dict(
                         "url" => "http://127.0.0.1:$port/subject-token",
                         "headers" => Dict("Metadata" => "True"),
