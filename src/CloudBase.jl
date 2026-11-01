@@ -239,8 +239,8 @@ function cloudlayer(provider::Symbol)
         return function(method, url, headers=Pair{String,String}[], body=nothing;
                         credentials=nothing, awsv2::Bool=false, trace=nothing,
                         logexceptionalduration::Int=0, kw...)
-            signkw = NamedTuple(k => v for (k, v) in pairs(kw) if k in SIGNING_KWARGS)
-            httpkw = NamedTuple(k => v for (k, v) in pairs(kw) if !(k in SIGNING_KWARGS))
+            httpkw = Base.structdiff((; kw...), NamedTuple{SIGNING_KWARGS})
+            signkw = Base.structdiff((; kw...), httpkw)
             uri = URI(url)
             httpkw = cloudhttpkwargs(provider, uri, credentials, httpkw)
             stats = CloudRequestStats()
@@ -299,8 +299,8 @@ function cloudopenlayer(provider::Symbol)
         return function(method, url, headers=Pair{String,String}[];
                         credentials=nothing, awsv2::Bool=false,
                         logexceptionalduration::Int=0, kw...)
-            signkw = NamedTuple(k => v for (k, v) in pairs(kw) if k in SIGNING_KWARGS)
-            httpkw = NamedTuple(k => v for (k, v) in pairs(kw) if !(k in SIGNING_KWARGS))
+            httpkw = Base.structdiff((; kw...), NamedTuple{SIGNING_KWARGS})
+            signkw = Base.structdiff((; kw...), httpkw)
             uri = URI(url)
             httpkw = cloudhttpkwargs(provider, uri, credentials, httpkw)
             if credentials !== nothing
